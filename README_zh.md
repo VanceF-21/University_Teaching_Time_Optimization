@@ -1,5 +1,10 @@
 # 大学教学时间优化
 
+[![English](https://img.shields.io/badge/Docs-English-FF4B4B?style=for-the-badge&logo=googletranslate&logoColor=white)](./README.md)
+[![Google Drive](https://img.shields.io/badge/输出文件-Google%20Drive-4285F4?style=for-the-badge&logo=googledrive&logoColor=white)](https://drive.google.com/drive/folders/1tPd5ysSP1J02JN9CroGGa4z9xvUDSTTO?usp=drive_link)
+[![Python](https://img.shields.io/badge/Python-3.9+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![FICO Xpress](https://img.shields.io/badge/求解器-FICO%20Xpress-FF6600?style=for-the-badge&logo=databricks&logoColor=white)](https://www.fico.com/en/products/fico-xpress-optimization)
+
 针对英国大学课表调整方案的分析流水线。
 
 ## 研究场景

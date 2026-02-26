@@ -1,5 +1,10 @@
 # University Teaching Time Optimization
 
+[![中文文档](https://img.shields.io/badge/文档-中文版-FF4B4B?style=for-the-badge&logo=googletranslate&logoColor=white)](./README_zh.md)
+[![Google Drive](https://img.shields.io/badge/Outputs-Google%20Drive-4285F4?style=for-the-badge&logo=googledrive&logoColor=white)](https://drive.google.com/drive/folders/1tPd5ysSP1J02JN9CroGGa4z9xvUDSTTO?usp=drive_link)
+[![Python](https://img.shields.io/badge/Python-3.9+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![FICO Xpress](https://img.shields.io/badge/Solver-FICO%20Xpress-FF6600?style=for-the-badge&logo=databricks&logoColor=white)](https://www.fico.com/en/products/fico-xpress-optimization)
+
 Analytical pipeline for evaluating timetable restructuring scenarios at university.
 
 ## Scenarios
