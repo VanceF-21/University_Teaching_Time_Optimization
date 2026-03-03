@@ -34,7 +34,7 @@
 
 - Python 3.9+
 - `pandas`、`numpy`、`matplotlib`、`seaborn`、`openpyxl`
-- [FICO Xpress](https://www.fico.com/en/products/fico-xpress-optimization)（仅 MIP 模型需要）
+- Python Xpress（仅 MIP 模型需要）
 
 安装依赖：
 

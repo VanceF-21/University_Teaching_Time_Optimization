@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.9+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![FICO Xpress](https://img.shields.io/badge/Solver-FICO%20Xpress-FF6600?style=for-the-badge&logo=databricks&logoColor=white)](https://www.fico.com/en/products/fico-xpress-optimization)
 
-Analytical pipeline for evaluating timetable restructuring scenarios at university.
+Analytical pipeline for evaluating timetable restructuring scenarios at university [Group 17].
 
 ## Scenarios
 
@@ -34,12 +34,12 @@ Analytical pipeline for evaluating timetable restructuring scenarios at universi
 
 - Python 3.9+
 - `pandas`, `numpy`, `matplotlib`, `seaborn`, `openpyxl`
-- [FICO Xpress](https://www.fico.com/en/products/fico-xpress-optimization) (for MIP model only)
+- Python Xpress (for MIP model only)
 
 Install dependencies:
 
 ```bash
-pip install pandas numpy matplotlib seaborn openpyxl
+pip install pandas numpy matplotlib seaborn openpyxl xpress
 ```
 
 ## Usage
@@ -60,7 +60,7 @@ python main.py --mip-events 200 --mip-time 120
 
 ## Output
 
-Each run creates a timestamped folder under `outputs/`:
+Each run creates a timestamped folder under `outputs/`. We put all the outputs on Google Drive:
 
 ```
 outputs/run_20260226_143022/
