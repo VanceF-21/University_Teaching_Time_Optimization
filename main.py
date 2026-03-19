@@ -234,8 +234,9 @@ def print_final_summary(baseline_results: dict,
 
     rows = []
 
-    # ── Q1 & Q2: Displaced events ────────────────────────────────────────────
+    # ── Q1 & Q2: Displaced events + NO_SLOT feasibility ─────────────────────
     disp = baseline_results.get("displaced_summary")
+    noslot = baseline_results.get("noslot_feasibility")
     if disp is not None:
         for sc in ["S1_9am5pm", "S2_NoFriPM"]:
             row = disp[disp["Scenario"] == sc]
@@ -246,6 +247,14 @@ def print_final_summary(baseline_results: dict,
                       f"({r['Displaced_Pct']:.1f}%)")
                 print(f"  WholeClass displaced: {r['Displaced_WholeClass']:,}")
                 print(f"  Unique modules affected: {r['Displaced_Unique_Modules']:,}")
+                # NEW: NO_SLOT events (cannot fit any allowed timeslot)
+                if noslot is not None:
+                    ns_row = noslot[noslot["Scenario"] == sc]
+                    if len(ns_row):
+                        ns = ns_row.iloc[0]
+                        print(f"  NO_SLOT (too long for window): {int(ns['N_NoSlot']):,} "
+                              f"({ns['NoSlot_Pct']:.1f}%)  — "
+                              f"WholeClass: {int(ns['N_NoSlot_WholeClass']):,}")
                 rows.append({
                     "RQ": f"Q{'1' if sc=='S1_9am5pm' else '2'}",
                     "Scenario":             sc,
@@ -272,6 +281,10 @@ def print_final_summary(baseline_results: dict,
             sm = hr.get("summary", {})
             print(f"  Heuristic {sc}: greedy={sm.get('Greedy_Clash_Score','N/A')}, "
                   f"local_search={sm.get('LocalSearch_Clash_Score','N/A')}")
+            # NEW: WholeClass clash-free breakdown
+            wc_cf  = sm.get('Greedy_ClashFree_WholeClass', 'N/A')
+            wc_pct = sm.get('Greedy_ClashFree_WholeClass_Pct', 'N/A')
+            print(f"    → WholeClass clash-free (greedy): {wc_cf} ({wc_pct}%)")
 
     # ── Q4: Lunch breaks ─────────────────────────────────────────────────────
     lunch = baseline_results.get("lunch_break")
@@ -287,6 +300,26 @@ def print_final_summary(baseline_results: dict,
         for _, row in util.iterrows():
             print(f"  {row['Scenario']}: {row['In_Window_Events']:,} events in window, "
                   f"room utilisation = {row['Room_Utilisation_Pct']:.1f}%")
+    # NEW: hourly load peak per scenario
+    hourly = baseline_results.get("hourly_load")
+    if hourly is not None:
+        print("\n[Q5] Peak teaching slot per scenario (events in window):")
+        for sc in ["S0_Baseline", "S1_9am5pm", "S2_NoFriPM"]:
+            sc_df = hourly[hourly["Scenario"] == sc]
+            if len(sc_df):
+                peak = sc_df.loc[sc_df["Num_Events"].idxmax()]
+                print(f"  {sc}: peak at {peak['Day']} {int(peak['Start_Hour'])}:00 "
+                      f"({int(peak['Num_Events'])} events, "
+                      f"{int(peak['Num_WholeClass'])} WholeClass)")
+    # NEW: heuristic day distribution (Q5 after rescheduling)
+    if heuristic_results:
+        print("\n[Q5] Rescheduled event distribution by day (heuristic):")
+        for sc in ["S1_9am5pm", "S2_NoFriPM"]:
+            if sc in heuristic_results:
+                sm = heuristic_results[sc].get("summary", {})
+                day_dist = {d: sm.get(f"Rescheduled_{d}", 0)
+                            for d in ["Monday","Tuesday","Wednesday","Thursday","Friday"]}
+                print(f"  {sc}: {day_dist}")
 
     # ── Save CSV ──────────────────────────────────────────────────────────────
     if rows:

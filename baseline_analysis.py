@@ -339,6 +339,114 @@ def detect_clashes(events: pd.DataFrame,
 
 
 # ============================================================
+# 6a. NO_SLOT Feasibility (Q1/Q2)
+# ============================================================
+def compute_noslot_feasibility(events: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each scenario, determine which displaced events have NO valid timeslot,
+    i.e. their duration is too long to fit within the allowed teaching window.
+
+    Logic mirrors heuristic_model.get_allowed_slots():
+      S1_9am5pm  : earliest start = 9am, must end ≤ 17:00 → max duration = 8h = 480 min
+      S2_NoFriPM : earliest start = 9am, must end ≤ 18:00 → max duration = 9h = 540 min
+                   (Friday PM restriction only affects START hour ≥ 12, not max duration)
+
+    Returns
+    -------
+    DataFrame: Scenario, Total_Displaced, N_NoSlot, NoSlot_Pct,
+               N_NoSlot_WholeClass, N_NoSlot_SubGroup,
+               plus one column per Event_Type that has any NO_SLOT events.
+    """
+    # Thresholds: max feasible duration (minutes) per scenario
+    WINDOW_MAX_DUR = {
+        "S1_9am5pm":  480.0,   # 17 - 9 = 8 h
+        "S2_NoFriPM": 540.0,   # 18 - 9 = 9 h
+    }
+    COL_MAP = {"S1_9am5pm": "Displaced_S1", "S2_NoFriPM": "Displaced_S2"}
+
+    records = []
+    for scenario, max_dur in WINDOW_MAX_DUR.items():
+        col  = COL_MAP[scenario]
+        disp = events[events[col]].copy()
+        disp["NoSlot"] = disp["Duration_min"] > max_dur
+
+        no_slot = disp[disp["NoSlot"]]
+        n_total = len(disp)
+        n_ns    = len(no_slot)
+
+        row = {
+            "Scenario":            scenario,
+            "Total_Displaced":     n_total,
+            "Max_Duration_Min":    max_dur,
+            "N_NoSlot":            n_ns,
+            "NoSlot_Pct":          round(100 * n_ns / max(n_total, 1), 2),
+            "N_NoSlot_WholeClass": int(no_slot["WholeClass"].sum()),
+            "N_NoSlot_SubGroup":   int((~no_slot["WholeClass"]).sum()),
+        }
+        # Top event types with NO_SLOT events
+        if n_ns > 0:
+            by_type = (
+                no_slot.groupby("Event_Type").size()
+                       .sort_values(ascending=False)
+                       .head(10)
+            )
+            for etype, cnt in by_type.items():
+                row[f"NoSlot_{etype.replace(' ','_')}"] = int(cnt)
+
+        records.append(row)
+        print(f"  {scenario}: {n_ns:,}/{n_total:,} displaced events have NO valid slot "
+              f"({row['NoSlot_Pct']:.1f}%)  — WholeClass: {row['N_NoSlot_WholeClass']:,}")
+
+    return pd.DataFrame(records)
+
+
+# ============================================================
+# 6b. Hourly Load Comparison by Day (Q5)
+# ============================================================
+def compute_hourly_load_comparison(events: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute the number of events scheduled in each (Day, Start_Hour) slot
+    under the baseline and both proposed scenarios.
+
+    For each scenario, only IN-WINDOW events are counted (displaced events
+    are assumed to be rescheduled and are excluded from the original slot).
+    This shows how the hour-by-hour teaching load is distributed across the
+    week before any optimisation is applied — the 'pressure' on each slot.
+
+    Returns
+    -------
+    DataFrame: Scenario, Day, Start_Hour, Num_Events, Num_WholeClass,
+               Student_Contact_Hours
+    """
+    records = []
+    for col, name in [("Displaced_S0", "S0_Baseline"),
+                      ("Displaced_S1", "S1_9am5pm"),
+                      ("Displaced_S2", "S2_NoFriPM")]:
+        in_window = events[~events[col]].dropna(subset=["Day", "Start_Hour"]).copy()
+        in_window["Contact_Hours"] = (
+            in_window["Event_Size"] * in_window["Duration_min"] / 60.0
+        )
+        grp = (
+            in_window.groupby(["Day", "Start_Hour"])
+            .agg(
+                Num_Events=("Event_ID", "count"),
+                Num_WholeClass=("WholeClass", "sum"),
+                Student_Contact_Hours=("Contact_Hours", "sum"),
+            )
+            .reset_index()
+        )
+        grp["Scenario"] = name
+        records.append(grp)
+
+    result = pd.concat(records, ignore_index=True)
+    # Add day ordering for easy sorting
+    day_idx = {d: i for i, d in enumerate(DAY_ORDER)}
+    result["Day_Idx"] = result["Day"].map(day_idx)
+    result = result.sort_values(["Scenario", "Day_Idx", "Start_Hour"]).drop(columns="Day_Idx")
+    return result
+
+
+# ============================================================
 # 6. Utilisation Comparison Across Scenarios
 # ============================================================
 def compute_utilisation_comparison(events: pd.DataFrame) -> pd.DataFrame:
@@ -497,6 +605,25 @@ def run_baseline_analysis(data: dict, out_dir: Path = None) -> dict:
     results["utilisation_comparison"] = util_comp
     print(util_comp[["Scenario","In_Window_Events","Displaced_Events",
                      "Room_Utilisation_Pct"]].to_string(index=False))
+
+    # --- Q1/Q2: NO_SLOT feasibility (events too long to fit any slot) ---
+    print("\n[baseline] Computing NO_SLOT feasibility per scenario...")
+    noslot_df = compute_noslot_feasibility(events)
+    noslot_df.to_csv(save_dir / "noslot_feasibility.csv", index=False)
+    results["noslot_feasibility"] = noslot_df
+
+    # --- Q5: Hourly load by day across scenarios ---
+    print("\n[baseline] Computing hourly load comparison by day...")
+    hourly_load = compute_hourly_load_comparison(events)
+    hourly_load.to_csv(save_dir / "hourly_load_comparison.csv", index=False)
+    results["hourly_load"] = hourly_load
+    # Quick summary: peak slot per scenario
+    for sc in ["S0_Baseline", "S1_9am5pm", "S2_NoFriPM"]:
+        sc_df = hourly_load[hourly_load["Scenario"] == sc]
+        if len(sc_df):
+            peak = sc_df.loc[sc_df["Num_Events"].idxmax()]
+            print(f"  {sc} peak slot: {peak['Day']} {int(peak['Start_Hour'])}:00 "
+                  f"— {int(peak['Num_Events'])} events")
 
     print("\n[baseline] Baseline analysis complete.\n")
     return results

@@ -588,22 +588,57 @@ def run_heuristic_scenario(scenario: str,
             slot_counts[slot] += 1
     cv_slots = np.std(list(slot_counts.values())) / max(np.mean(list(slot_counts.values())), 1)
 
+    # ── Q1/Q2: NO_SLOT analysis (events that cannot fit ANY timeslot) ────────
+    n_noslot    = int(assignment_df["New_Day"].isna().sum())
+    n_noslot_wc = int(
+        assignment_df[assignment_df["WholeClass"] == True]["New_Day"].isna().sum()
+    )
+    noslot_pct  = round(100 * n_noslot / max(len(assignment_df), 1), 2)
+    print(f"\n  NO_SLOT events (cannot fit window): {n_noslot:,} "
+          f"({noslot_pct:.1f}%)  — WholeClass: {n_noslot_wc:,}")
+
+    # ── Q3: WholeClass-specific clash-free rate (from greedy phase) ──────────
+    wc_greedy       = greedy_df[greedy_df["WholeClass"] == True]
+    wc_placed       = int((wc_greedy["Status"] != "NO_SLOT").sum())
+    wc_clash_free   = int((wc_greedy["Status"] == "CLASH_FREE").sum())
+    wc_clash_pct    = round(100 * wc_clash_free / max(wc_placed, 1), 2)
+    print(f"  WholeClass greedy clash-free: {wc_clash_free:,}/{wc_placed:,} "
+          f"({wc_clash_pct:.1f}%)")
+
+    # ── Q5: Rescheduled events distribution by day ───────────────────────────
+    placed_df   = assignment_df[assignment_df["New_Day"].notna()]
+    day_counts  = placed_df.groupby("New_Day").size()
+    day_dist    = {day: int(day_counts.get(day, 0)) for day in DAY_ORDER}
+    print(f"  Day distribution of rescheduled events: {day_dist}")
+
     # ── Summary ──────────────────────────────────────────────────────────────
     summary = {
-        "Scenario":                   scenario,
-        "N_Displaced_Total":          len(events[events[displaced_col]]),
-        "N_Displaced_Processed":      len(disp_events),
-        "N_Rescheduled":              len(assignment_df),
-        "Greedy_Clash_Score":         round(greedy_clash, 0),
-        "LocalSearch_Clash_Score":    round(ls_clash, 0) if run_local_search else None,
-        "Improvement_Pct":            round(100*(greedy_clash-ls_clash)/max(greedy_clash,1), 2)
-                                       if run_local_search else 0,
-        "Clash_Free_Placements":      int((assignment_df["New_Day"].notna()).sum()),
-        "Lunch_Free_Pct":             lunch["pct_free"],
-        "Slot_Balance_CV":            round(cv_slots, 4),
+        "Scenario":                        scenario,
+        "N_Displaced_Total":               len(events[events[displaced_col]]),
+        "N_Displaced_Processed":           len(disp_events),
+        "N_Rescheduled":                   len(assignment_df),
+        # Q1/Q2 — feasibility
+        "N_NoSlot":                        n_noslot,
+        "N_NoSlot_WholeClass":             n_noslot_wc,
+        "NoSlot_Pct":                      noslot_pct,
+        # Q3 — clash quality
+        "Greedy_Clash_Score":              round(greedy_clash, 0),
+        "LocalSearch_Clash_Score":         round(ls_clash, 0) if run_local_search else None,
+        "Improvement_Pct":                 round(100*(greedy_clash-ls_clash)/max(greedy_clash,1), 2)
+                                            if run_local_search else 0,
+        "Clash_Free_Placements":           int((assignment_df["New_Day"].notna()).sum()),
+        "Greedy_ClashFree_WholeClass":     wc_clash_free,
+        "Greedy_ClashFree_WholeClass_Pct": wc_clash_pct,
+        # Q4 — lunch
+        "Lunch_Free_Pct":                  lunch["pct_free"],
+        # Q5 — slot balance
+        "Slot_Balance_CV":                 round(cv_slots, 4),
     }
     for day, pct in lunch["by_day"].items():
         summary[f"Lunch_Free_{day}"] = pct
+    # Q5 — day distribution of rescheduled events
+    for day in DAY_ORDER:
+        summary[f"Rescheduled_{day}"] = day_dist[day]
 
     summary_df = pd.DataFrame([summary])
     summary_df.to_csv(save_dir / f"heuristic_summary_{scenario}.csv", index=False)
