@@ -119,6 +119,7 @@ def load_events() -> pd.DataFrame:
         "Room Lock":           "Room_Lock",
     }
     raw.rename(columns=rename_map, inplace=True)
+    
 
     # Exclude purely online events (they have no physical room/timeslot impact)
     online_mask = raw["Online_Delivery"].notna()
@@ -193,6 +194,7 @@ def load_student_events() -> pd.DataFrame:
     }
     raw.rename(columns=rename_map, inplace=True)
     raw = raw.dropna(subset=["AnonID", "Event_ID"])
+    raw = raw.drop_duplicates(subset=["AnonID", "Event_ID"])
     print(f"  Rows: {len(raw):,} | Students: {raw['AnonID'].nunique():,} | Events: {raw['Event_ID'].nunique():,}")
     return raw.reset_index(drop=True)
 
@@ -320,7 +322,7 @@ def tag_displaced_events(events: pd.DataFrame) -> pd.DataFrame:
 
     S0_Baseline  : no events displaced (reference)
     S1_9am5pm    : displaced if End_Hour > 17.0
-    S2_NoFriPM   : displaced if Day=="Friday" AND Start_Hour >= 12.0
+    S2_NoFriPM   : displaced if Day=="Friday" AND End_Hour > 12.0
     """
     events = events.copy()
 
@@ -330,8 +332,8 @@ def tag_displaced_events(events: pd.DataFrame) -> pd.DataFrame:
     # Scenario 1: 9am-5pm — event must FINISH by 17:00
     events["Displaced_S1"] = events["End_Hour"] > 17.0
 
-    # Scenario 2: No Friday PM — Friday events starting at or after 12:00
-    events["Displaced_S2"] = (events["Day"] == "Friday") & (events["Start_Hour"] >= 12.0)
+    # Scenario 2: No Friday PM — Friday events must finish by 12:00
+    events["Displaced_S2"] = ( (events["Day"] == "Friday") & (events["End_Hour"] > 12.0))
 
     print("[data_preprocessing] Displaced event counts:")
     print(f"  S1 (9am-5pm):    {events['Displaced_S1'].sum():,} events displaced")
@@ -350,7 +352,7 @@ def get_allowed_slots(scenario_key: str,
     given scenario for an event of `duration_min` minutes.
 
     The end of the event = Start_Hour + duration_min/60 must be <= end_max.
-    For Scenario 2, Friday events starting at 12 or later are excluded.
+    For Scenario 2, Friday events must finish by 12:00.
     """
     sc = SCENARIOS[scenario_key]
     slots = []
@@ -361,8 +363,8 @@ def get_allowed_slots(scenario_key: str,
             # Must end by end_max
             if end_h > sc["end_max"]:
                 continue
-            # No Friday PM
-            if sc["exclude_fri_pm"] and day == "Friday" and sh >= 12:
+            # No Friday PM: Friday events must finish by 12:00
+            if sc["exclude_fri_pm"] and day == "Friday" and end_h > 12.0:
                 continue
             slots.append((day, float(sh)))
     return slots
@@ -425,7 +427,7 @@ def run_preprocessing(build_conflicts: bool = True, out_dir: Path = None) -> dic
     conflict_pairs_path = save_dir / "conflict_pairs.csv"
 
     if build_conflicts:
-        conflict_pairs = build_conflict_pairs(student_events, events)
+        conflict_pairs = build_conflict_pairs(se_valid, events)
         conflict_pairs.to_csv(conflict_pairs_path, index=False)
         print(f"[data_preprocessing] Saved conflict_pairs.csv ({len(conflict_pairs):,} rows)")
     elif conflict_pairs_path.exists():
