@@ -113,7 +113,7 @@ def get_event_allowed_slots(duration_min: float,
             end_h = sh + duration_min / 60.0
             if end_h > end_limit:
                 continue
-            if scenario == "S2_NoFriPM" and day == "Friday" and sh >= 12:
+            if scenario == "S2_NoFriPM" and day == "Friday" and sh + duration_min / 60.0 > 12.0:
                 continue
             allowed.append((day, float(sh)))
     return allowed

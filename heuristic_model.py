@@ -84,7 +84,7 @@ def get_allowed_slots(duration_min: float, scenario: str) -> list:
         for sh in ALL_HOURS:
             if sh + duration_min / 60.0 > end_limit:
                 continue
-            if scenario == "S2_NoFriPM" and day == "Friday" and sh >= 12:
+            if scenario == "S2_NoFriPM" and day == "Friday" and sh + duration_min / 60.0 > 12.0:
                 continue
             slots.append((day, float(sh)))
     return slots
