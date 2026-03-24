@@ -25,19 +25,21 @@ Purpose:
     Complexity: O(|E_disp| × |T| × degree) where degree = avg conflicts per event.
 
     ═══════════════════════════════════════════════════════════════════════════
-    ALGORITHM 2: Local Search (Swap Improvement)
+    ALGORITHM 2: Local Search (Relocation Improvement)
     ═══════════════════════════════════════════════════════════════════════════
-    Starting from the greedy solution, iteratively improve by swapping timeslots
-    between pairs of displaced events.
+    Starting from the greedy solution, iteratively improve by relocating
+    individual displaced events to better timeslots (relocation neighbourhood).
 
-    Step 1: Compute initial total clash score.
-    Step 2: For each pair of events (e1, e2):
-              Try swapping their assigned timeslots.
-              If the swap reduces total clashes → accept (steepest descent).
-    Step 3: Repeat until no improving swap found or max_iterations reached.
+    Step 1: Compute initial total clash score (displaced–displaced pairs only).
+    Step 2: For each displaced event e1:
+              Try moving e1 to each of its other allowed timeslots.
+              If the move reduces total clashes → accept (first improvement).
+    Step 3: Repeat until no improving move found or max_iterations reached.
 
-    This is a classic NEIGHBOURHOOD SEARCH with swap neighbourhood.
-    Each iteration is O(|E_disp|² × |conflicts|).
+    This is a classic NEIGHBOURHOOD SEARCH with relocation (single-event move)
+    neighbourhood.  Each iteration is O(|E_disp| × |T| × degree).
+    Note: this is NOT a swap neighbourhood — two events' slots are never
+    exchanged simultaneously.  A swap neighbourhood would be O(|E_disp|² × |T|).
 
     ═══════════════════════════════════════════════════════════════════════════
     METRICS
@@ -310,8 +312,9 @@ def local_search(assignment: dict,
                   max_iterations: int = 500,
                   patience: int = 20) -> tuple:
     """
-    Local search: iteratively swap timeslots between pairs of displaced events.
-    Accepts only improving swaps (steepest descent).
+    Local search: iteratively relocate individual displaced events to better
+    timeslots (relocation / single-event-move neighbourhood).
+    Accepts only improving moves (first improvement descent).
 
     Parameters
     ----------
@@ -521,9 +524,20 @@ def run_heuristic_scenario(scenario: str,
                   for _, row in events.iterrows()}
 
     # ── Phase 1: Greedy ──────────────────────────────────────────────────────
-    assignment, greedy_df, greedy_clash = greedy_assignment(
+    assignment, greedy_df, _greedy_clash_raw = greedy_assignment(
         disp_events, fixed_events, conflict_adj, conflict_weights, scenario
     )
+    # _greedy_clash_raw is a running sum that includes clashes of displaced events
+    # with fixed events (which can never be moved and so are not a fair comparison
+    # target for ls_clash).  Recompute using ONLY displaced–displaced pairs so
+    # both Greedy_Clash_Score and LocalSearch_Clash_Score use the same metric.
+    disp_ids_set = set(disp_events["Event_ID"])
+    greedy_clash = compute_clash_score(
+        {eid: slot for eid, slot in assignment.items() if eid in disp_ids_set},
+        event_info, conflict_adj, conflict_weights,
+    )
+    print(f"  Greedy clash score (disp–disp pairs only): {greedy_clash:.0f}  "
+          f"(raw incl. fixed-event clashes: {_greedy_clash_raw:.0f})")
 
     # ── Phase 2: Local Search ────────────────────────────────────────────────
     iteration_log = []

@@ -346,7 +346,20 @@ def run_mip_scenario(scenario: str,
     print(f"  Assignment constraints: {n_assignment:,}")
     print(f"  (Blocking constraints eliminated by pre-filtering viable slots)")
 
-    # (3) Clash detection: if both e1 and e2 land on same slot → z = 1
+    # Build duration lookup for displaced events (needed for overlap detection)
+    disp_dur_map = {row["Event_ID"]: row["Duration_min"]
+                    for _, row in disp_events.iterrows()}
+
+    # (3) Clash detection: if e1 and e2 are scheduled at OVERLAPPING timeslots → z = 1
+    #
+    # FIX (was: only checked identical (day, start_hour) pairs — missed overlaps
+    # between events with different start times, e.g. a 2-hour event at 9:00 and
+    # a 1-hour event at 10:00 both running into 11:00 were never constrained).
+    #
+    # Now: for every pair of viable slots (t1 from e1, t2 from e2) where the two
+    # time windows overlap (start1 < end2  AND  start2 < end1), add:
+    #   x[e1, t1] + x[e2, t2] <= 1 + z[e1, e2]
+    # This forces z = 1 whenever the pair is scheduled at any overlapping combination.
     for (e1, e2, _) in dd_list:
         if e1 not in event_slot_list or e2 not in event_slot_list:
             continue
@@ -354,16 +367,22 @@ def run_mip_scenario(scenario: str,
         if key not in z:
             continue
 
-        # Find slots that are common to both events (same day and start)
+        dur1 = disp_dur_map.get(e1, 60.0)
+        dur2 = disp_dur_map.get(e2, 60.0)
+
         slots_e1 = {slot: var for var, slot in event_slot_list[e1]}
         slots_e2 = {slot: var for var, slot in event_slot_list[e2]}
-        common = set(slots_e1.keys()) & set(slots_e2.keys())
 
-        for slot in common:
-            # If both scheduled here, z must be 1
-            # x[e1,t] + x[e2,t] <= 1 + z[e1,e2]
-            prob.addConstraint(slots_e1[slot] + slots_e2[slot] <= 1 + z[key])
-            n_clash_det += 1
+        for (d1, sh1), var1 in slots_e1.items():
+            end1 = sh1 + dur1 / 60.0
+            for (d2, sh2), var2 in slots_e2.items():
+                if d1 != d2:
+                    continue
+                end2 = sh2 + dur2 / 60.0
+                # Standard interval-overlap test: [sh1, end1) ∩ [sh2, end2) ≠ ∅
+                if sh1 < end2 and sh2 < end1:
+                    prob.addConstraint(var1 + var2 <= 1 + z[key])
+                    n_clash_det += 1
 
     print(f"  Clash-detection constraints: {n_clash_det:,}")
 
