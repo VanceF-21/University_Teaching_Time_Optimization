@@ -354,31 +354,131 @@ def plot_heuristic_iterations(heuristic_results: dict):
 
 # 12. MIP vs Heuristic Comparison
 def plot_mip_vs_heuristic(mip_results: dict, heuristic_results: dict):
+    """
+    Side-by-side bar chart comparing weighted clash scores across methods.
+
+    All three bars (Greedy, Local Search, MIP) use the same metric:
+        Σ shared_students  for clashing disp–disp event pairs
+    which is:
+        • Greedy      → summary["Greedy_Clash_Score"]
+        • Local Search → summary["LocalSearch_Clash_Score"]
+        • MIP          → result["objective"]  (= Objective_Value in summary)
+
+    BUG FIX: previously used mr.get("n_clashes") which is a raw pair COUNT
+    (e.g. 3), not the weighted score (e.g. 420).  That made the MIP bar
+    appear near-zero while heuristic bars were in the hundreds, creating a
+    completely misleading visual.  Now all three use the weighted score.
+    """
     scenarios = ["S1_9am5pm", "S2_NoFriPM"]
-    methods   = ["Greedy", "Local Search", "MIP"]
-    clash_data = {m: [] for m in methods}
 
+    # ── Collect data ─────────────────────────────────────────────────────────
+    records = []
     for sc in scenarios:
-        hr = heuristic_results.get(sc, {})
-        mr = mip_results.get(sc, {})
+        hr = (heuristic_results or {}).get(sc, {})
+        mr = (mip_results or {}).get(sc, {})
+        hs = hr.get("summary", {})
 
-        clash_data["Greedy"].append(hr.get("summary", {}).get("Greedy_Clash_Score", 0))
-        clash_data["Local Search"].append(hr.get("summary", {}).get("LocalSearch_Clash_Score", 0) or 0)
-        clash_data["MIP"].append(mr.get("n_clashes", 0) or 0)
+        greedy_score = hs.get("Greedy_Clash_Score") or 0
+        ls_score     = hs.get("LocalSearch_Clash_Score") or 0
+        # FIX: use mr["objective"] (weighted Σ shared_students × z[e1,e2]),
+        # NOT mr["n_clashes"] (raw count of pairs where z=1)
+        mip_score    = mr.get("objective") if mr.get("objective") is not None else None
 
-    x = np.arange(len(scenarios))
-    w = 0.25
-    fig, ax = plt.subplots(figsize=(9, 5))
-    colors = ["#4C72B0", "#DD8452", "#55A868"]
-    for i, (method, vals) in enumerate(clash_data.items()):
-        ax.bar(x + (i-1)*w, vals, w, label=method,
-               color=colors[i], alpha=0.85, edgecolor="white")
+        records.append({
+            "Scenario":    sc,
+            "Greedy":      greedy_score,
+            "Local Search": ls_score,
+            "MIP":         mip_score,
+            "MIP_status":  mr.get("status", ""),
+        })
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([s.replace("_"," ") for s in scenarios])
-    ax.set_ylabel("Weighted Clash Score")
-    ax.set_title("Clash Reduction: MIP vs Heuristic Methods", fontsize=14)
-    ax.legend()
+    # ── Layout: two subplots (one per scenario) ───────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+    method_colors = {
+        "Greedy":       "#4C72B0",
+        "Local Search": "#DD8452",
+        "MIP":          "#55A868",
+    }
+
+    any_mip = any(r["MIP"] is not None for r in records)
+
+    for ax, rec in zip(axes, records):
+        sc       = rec["Scenario"]
+        methods  = ["Greedy", "Local Search"]
+        values   = [rec["Greedy"], rec["Local Search"]]
+        colors_  = [method_colors["Greedy"], method_colors["Local Search"]]
+
+        # Only add MIP bar when a solution was found
+        mip_val = rec["MIP"]
+        if mip_val is not None:
+            methods.append(f"MIP\n({rec['MIP_status']})")
+            values.append(mip_val)
+            colors_.append(method_colors["MIP"])
+        elif any_mip:
+            # MIP ran for other scenario but not this one — show greyed placeholder
+            methods.append("MIP\n(no result)")
+            values.append(0)
+            colors_.append("#CCCCCC")
+
+        x      = np.arange(len(methods))
+        bars   = ax.bar(x, values, width=0.5, color=colors_, alpha=0.88,
+                        edgecolor="white", linewidth=0.8)
+
+        ax.set_title(sc.replace("_", " "), fontsize=13, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(methods, fontsize=11)
+        ax.set_ylabel("Weighted Clash Score\n(Σ shared_students × clashing pairs)", fontsize=10)
+        ax.set_ylim(0, max(values) * 1.25 if max(values) > 0 else 1)
+
+        # Annotate bar values
+        for bar, val in zip(bars, values):
+            if val and val > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + max(values) * 0.02,
+                        f"{val:,.0f}",
+                        ha="center", va="bottom", fontsize=11, fontweight="bold")
+            elif val == 0 and bar.get_facecolor() != (0.8, 0.8, 0.8, 1.0):
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        max(values) * 0.03,
+                        "0", ha="center", va="bottom", fontsize=11, fontweight="bold",
+                        color="green")
+
+        # Improvement arrow: Greedy → Local Search
+        # Arrow runs from top of Greedy bar to top of Local Search bar.
+        # Label sits at the vertical midpoint between the two bars.
+        if rec["Local Search"] < rec["Greedy"] and rec["Greedy"] > 0:
+            improv  = 100 * (rec["Greedy"] - rec["Local Search"]) / rec["Greedy"]
+            pad     = max(values) * 0.015        # small gap above bar tops
+            y_start = rec["Greedy"]      + pad   # tail (Greedy bar top)
+            y_end   = rec["Local Search"] + pad  # tip  (LS bar top)
+            y_label = (rec["Greedy"] + rec["Local Search"]) / 2  # midpoint
+
+            # Arrow: bar-centre x-coords are 0 (Greedy) and 1 (Local Search)
+            ax.annotate(
+                "",
+                xy      =(1, y_end),
+                xytext  =(0, y_start),
+                arrowprops=dict(arrowstyle="->", color="#555555", lw=1.5),
+            )
+            # Percentage label at vertical midpoint, centred between the two bars
+            ax.text(
+                0.5, y_label,
+                f"−{improv:.1f}%",
+                ha="center", va="center",
+                fontsize=10, color="#555555",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
+                          edgecolor="#aaaaaa", alpha=0.85),
+            )
+
+    scope_note = ("Note: MIP scope = WholeClass displaced events only; "
+                  "Heuristic covers all displaced events.\n"
+                  "All bars use the same metric: weighted disp–disp clash score.")
+    fig.text(0.5, -0.04, scope_note, ha="center", fontsize=9, color="grey",
+             style="italic")
+
+    plt.suptitle("Clash Score Comparison: MIP vs Heuristic Methods (Q3)",
+                 fontsize=14, fontweight="bold", y=1.02)
+    plt.tight_layout()
     save_fig(fig, "mip_vs_heuristic_comparison.png")
 
 
@@ -535,10 +635,13 @@ def run_all_visualisations(data: dict,
         plot_heuristic_iterations(heuristic_results)
         plot_timeslot_load_comparison(events, heuristic_results)
 
-        # MIP vs Heuristic
-        if mip_results:
-            print("[viz] Generating MIP vs Heuristic comparison...")
-            plot_mip_vs_heuristic(mip_results, heuristic_results)
+    # ── MIP vs Heuristic comparison ──────────────────────────────────────────
+    # Always generate when at least one model has results.
+    # MIP bars are greyed-out placeholders when MIP was skipped.
+    # BUG FIX: previously skipped entirely when mip_results was empty.
+    if heuristic_results or mip_results:
+        print("[viz] Generating MIP vs Heuristic comparison...")
+        plot_mip_vs_heuristic(mip_results or {}, heuristic_results or {})
 
     print(f"\n[viz] All figures saved to {fig_dir}")
     _active_fig_dir = None   # reset after run
