@@ -23,16 +23,14 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings("ignore")
 
-# ============================================================
+
 # Paths
-# ============================================================
 DATA_DIR  = Path(__file__).resolve().parent / "data"
 OUT_DIR   = Path(__file__).resolve().parent / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
-# ============================================================
+
 # Constants
-# ============================================================
 DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 DAY_INDEX = {d: i for i, d in enumerate(DAY_ORDER)}
 
@@ -67,9 +65,8 @@ SCENARIOS = {
     },
 }
 
-# ============================================================
+
 # 1. Load & Clean Events
-# ============================================================
 def load_events() -> pd.DataFrame:
     """
     Load '2024-5 Event Module Room.xlsx' and perform:
@@ -163,9 +160,8 @@ def load_events() -> pd.DataFrame:
     return raw_scheduled.reset_index(drop=True)
 
 
-# ============================================================
+
 # 2. Load Student–Event Mapping
-# ============================================================
 def load_student_events() -> pd.DataFrame:
     """
     Load '2024-5 Student Programme Module Event.xlsx'.
@@ -199,9 +195,7 @@ def load_student_events() -> pd.DataFrame:
     return raw.reset_index(drop=True)
 
 
-# ============================================================
 # 3. Load Rooms
-# ============================================================
 def load_rooms() -> pd.DataFrame:
     """
     Load 'Rooms and Room Types.xlsx' sheet 'Room'.
@@ -233,9 +227,8 @@ def load_rooms() -> pd.DataFrame:
     return raw.reset_index(drop=True)
 
 
-# ============================================================
+
 # 4. Load Programme-Course mapping
-# ============================================================
 def load_programme_course() -> pd.DataFrame:
     """
     Load 'Programme-Course.xlsx' sheet 'CourseModule'.
@@ -247,9 +240,8 @@ def load_programme_course() -> pd.DataFrame:
     return raw.reset_index(drop=True)
 
 
-# ============================================================
+
 # 5. Build Conflict Pairs
-# ============================================================
 def build_conflict_pairs(student_events: pd.DataFrame,
                          events: pd.DataFrame,
                          max_students_for_full_build: int = 30_000
@@ -312,9 +304,7 @@ def build_conflict_pairs(student_events: pd.DataFrame,
     return df_pairs
 
 
-# ============================================================
 # 6. Scenario Tagging
-# ============================================================
 def tag_displaced_events(events: pd.DataFrame) -> pd.DataFrame:
     """
     For each scenario, add a boolean column indicating whether each event
@@ -342,9 +332,8 @@ def tag_displaced_events(events: pd.DataFrame) -> pd.DataFrame:
     return events
 
 
-# ============================================================
+
 # 7. Compute Allowed Timeslots per Scenario
-# ============================================================
 def get_allowed_slots(scenario_key: str,
                       duration_min: float = 60.0) -> list:
     """
@@ -370,9 +359,8 @@ def get_allowed_slots(scenario_key: str,
     return slots
 
 
-# ============================================================
+
 # 8. Main pipeline
-# ============================================================
 def run_preprocessing(build_conflicts: bool = True, out_dir: Path = None) -> dict:
     """
     Full preprocessing pipeline. Saves output CSVs to out_dir (or OUT_DIR).

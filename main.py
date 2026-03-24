@@ -74,7 +74,8 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings("ignore")
 
-# ── Local modules ─────────────────────────────────────────────────────────────
+
+# Local modules
 from data_preprocessing import run_preprocessing
 from baseline_analysis  import run_baseline_analysis
 from visualization      import run_all_visualisations
@@ -85,9 +86,8 @@ OUT_DIR.mkdir(exist_ok=True)
 CLEANED_DIR.mkdir(exist_ok=True)
 
 
-# ============================================================
+
 # Log Tee  —  mirror all stdout/stderr to a .txt file
-# ============================================================
 class _Tee:
     """Write every write() call to both the original stream and a log file."""
 
@@ -185,9 +185,8 @@ def teardown_logging():
         print(f"[log] Log saved → {log_path}")
 
 
-# ============================================================
+
 # Argument Parser
-# ============================================================
 def parse_args():
     parser = argparse.ArgumentParser(
         description="University Teaching Time Optimization — TIME Scenario",
@@ -218,9 +217,8 @@ def parse_args():
     return parser.parse_args()
 
 
-# ============================================================
+
 # Final Summary
-# ============================================================
 def print_final_summary(baseline_results: dict,
                           mip_results: dict,
                           heuristic_results: dict,
@@ -332,9 +330,8 @@ def print_final_summary(baseline_results: dict,
     print("=" * 70)
 
 
-# ============================================================
+
 # Main Pipeline
-# ============================================================
 def main():
     args = parse_args()
     t_start = time.time()

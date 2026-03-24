@@ -81,9 +81,8 @@ OUT_DIR.mkdir(exist_ok=True)
 DAY_ORDER  = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 DAY_INDEX  = {d: i for i, d in enumerate(DAY_ORDER)}
 
-# ============================================================
+
 # Constants
-# ============================================================
 MAX_EVENTS    = 500    # Max displaced events to include in MIP (for tractability)
 SOLVER_TLIMIT = 300    # Seconds
 MIP_GAP       = 0.02   # 2% optimality gap acceptable
@@ -91,9 +90,8 @@ MIP_GAP       = 0.02   # 2% optimality gap acceptable
 # Teaching hour slots available (whole hours)
 ALL_HOURS = list(range(9, 18))   # 9, 10, ..., 17
 
-# ============================================================
+
 # Helper: Build allowed timeslots for an event
-# ============================================================
 def get_event_allowed_slots(duration_min: float,
                              scenario: str,
                              current_slot: tuple = None) -> list:
@@ -119,9 +117,8 @@ def get_event_allowed_slots(duration_min: float,
     return allowed
 
 
-# ============================================================
+
 # Helper: Check if two events overlap given their timeslots
-# ============================================================
 def events_overlap(day1, start1, dur1, day2, start2, dur2) -> bool:
     """Return True if events at (day1, start1, dur1) and (day2, start2, dur2) overlap."""
     if day1 != day2:
@@ -131,9 +128,8 @@ def events_overlap(day1, start1, dur1, day2, start2, dur2) -> bool:
     return start1 < end2 and start2 < end1
 
 
-# ============================================================
+
 # Main MIP Model
-# ============================================================
 def run_mip_scenario(scenario: str,
                      events: pd.DataFrame,
                      conflict_pairs: pd.DataFrame,
@@ -497,9 +493,8 @@ def run_mip_scenario(scenario: str,
     }
 
 
-# ============================================================
+
 # Post-optimisation: Compute metrics from MIP assignment
-# ============================================================
 def compute_mip_metrics(assignment_df: pd.DataFrame,
                         events: pd.DataFrame,
                         student_events: pd.DataFrame,
@@ -562,9 +557,8 @@ def compute_mip_metrics(assignment_df: pd.DataFrame,
     return metrics
 
 
-# ============================================================
+
 # Run both scenarios
-# ============================================================
 def run_all_mip_scenarios(data: dict,
                            max_events: int = MAX_EVENTS,
                            time_limit: int = SOLVER_TLIMIT,

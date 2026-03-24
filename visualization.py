@@ -48,9 +48,8 @@ SCENARIO_COLORS = {
 sns.set_theme(style="whitegrid", font_scale=1.1)
 
 
-# ============================================================
+
 # Utility: Save figure
-# ============================================================
 def save_fig(fig, name: str, dpi: int = 150):
     d = _active_fig_dir if _active_fig_dir is not None else FIG_DIR
     path = d / name
@@ -59,9 +58,8 @@ def save_fig(fig, name: str, dpi: int = 150):
     print(f"  [viz] Saved {name}")
 
 
-# ============================================================
+
 # 1 & 2. Event Density Heatmaps
-# ============================================================
 def plot_event_heatmaps(events: pd.DataFrame):
     """
     Heatmap of number of events per (Day, Start_Hour) slot.
@@ -92,9 +90,8 @@ def plot_event_heatmaps(events: pd.DataFrame):
         save_fig(fig, fname)
 
 
-# ============================================================
+
 # 3. Displaced Events Bar Chart
-# ============================================================
 def plot_displaced_bar(events: pd.DataFrame):
     """
     Bar chart comparing total displaced events in S1 vs S2.
@@ -134,9 +131,8 @@ def plot_displaced_bar(events: pd.DataFrame):
     save_fig(fig, "displaced_events_bar.png")
 
 
-# ============================================================
+
 # 4. Displaced Events by Day
-# ============================================================
 def plot_displaced_by_day(events: pd.DataFrame):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
 
@@ -158,9 +154,8 @@ def plot_displaced_by_day(events: pd.DataFrame):
     save_fig(fig, "displaced_by_day.png")
 
 
-# ============================================================
+
 # 5. Displaced Events by Event Type
-# ============================================================
 def plot_displaced_by_eventtype(events: pd.DataFrame):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -179,9 +174,8 @@ def plot_displaced_by_eventtype(events: pd.DataFrame):
     save_fig(fig, "displaced_by_eventtype.png")
 
 
-# ============================================================
+
 # 6. Clash Comparison
-# ============================================================
 def plot_clash_comparison(clash_df: pd.DataFrame):
     if clash_df is None or len(clash_df) == 0:
         print("  [viz] No clash data to plot")
@@ -219,9 +213,8 @@ def plot_clash_comparison(clash_df: pd.DataFrame):
     save_fig(fig, "clash_comparison.png")
 
 
-# ============================================================
+
 # 7. Lunch Break Comparison
-# ============================================================
 def plot_lunch_comparison(lunch_df: pd.DataFrame):
     if lunch_df is None or len(lunch_df) == 0:
         print("  [viz] No lunch data to plot")
@@ -246,9 +239,8 @@ def plot_lunch_comparison(lunch_df: pd.DataFrame):
     save_fig(fig, "lunch_break_comparison.png")
 
 
-# ============================================================
+
 # 8. Lunch Free by Day
-# ============================================================
 def plot_lunch_by_day(lunch_df: pd.DataFrame):
     if lunch_df is None:
         return
@@ -279,9 +271,8 @@ def plot_lunch_by_day(lunch_df: pd.DataFrame):
     save_fig(fig, "lunch_by_day.png")
 
 
-# ============================================================
+
 # 9. Room Fill Rate Histogram
-# ============================================================
 def plot_room_utilisation_hist(room_util: pd.DataFrame):
     if room_util is None:
         return
@@ -297,9 +288,8 @@ def plot_room_utilisation_hist(room_util: pd.DataFrame):
     save_fig(fig, "room_utilisation_histogram.png")
 
 
-# ============================================================
+
 # 10. Utilisation Comparison
-# ============================================================
 def plot_utilisation_comparison(util_df: pd.DataFrame):
     if util_df is None:
         return
@@ -332,9 +322,8 @@ def plot_utilisation_comparison(util_df: pd.DataFrame):
     save_fig(fig, "utilisation_comparison.png")
 
 
-# ============================================================
+
 # 11. Heuristic Iteration Curves
-# ============================================================
 def plot_heuristic_iterations(heuristic_results: dict):
     if not heuristic_results:
         return
@@ -362,9 +351,8 @@ def plot_heuristic_iterations(heuristic_results: dict):
     save_fig(fig, "heuristic_iteration_curve.png")
 
 
-# ============================================================
+
 # 12. MIP vs Heuristic Comparison
-# ============================================================
 def plot_mip_vs_heuristic(mip_results: dict, heuristic_results: dict):
     scenarios = ["S1_9am5pm", "S2_NoFriPM"]
     methods   = ["Greedy", "Local Search", "MIP"]
@@ -394,9 +382,8 @@ def plot_mip_vs_heuristic(mip_results: dict, heuristic_results: dict):
     save_fig(fig, "mip_vs_heuristic_comparison.png")
 
 
-# ============================================================
+
 # 13. Timeslot Load Before/After
-# ============================================================
 def plot_timeslot_load_comparison(events: pd.DataFrame, heuristic_results: dict):
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
@@ -451,9 +438,8 @@ def plot_timeslot_load_comparison(events: pd.DataFrame, heuristic_results: dict)
     save_fig(fig, "timeslot_load_before_after.png")
 
 
-# ============================================================
+
 # 14. End-Hour Distribution
-# ============================================================
 def plot_end_hour_distribution(events: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(10, 5))
 
@@ -476,9 +462,8 @@ def plot_end_hour_distribution(events: pd.DataFrame):
     save_fig(fig, "end_hour_distribution.png")
 
 
-# ============================================================
+
 # Master: Run all visualisations
-# ============================================================
 def run_all_visualisations(data: dict,
                             baseline_results: dict,
                             mip_results: dict = None,

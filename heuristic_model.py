@@ -70,9 +70,8 @@ DAY_INDEX = {d: i for i, d in enumerate(DAY_ORDER)}
 ALL_HOURS = list(range(9, 18))   # Possible start hours: 9, 10, ..., 17
 
 
-# ============================================================
+
 # Helper: Get allowed slots for a scenario + duration
-# ============================================================
 def get_allowed_slots(duration_min: float, scenario: str) -> list:
     """
     Return sorted list of (day, start_hour) tuples allowed for this event.
@@ -90,9 +89,8 @@ def get_allowed_slots(duration_min: float, scenario: str) -> list:
     return slots
 
 
-# ============================================================
+
 # Helper: Check time overlap
-# ============================================================
 def events_overlap(day1, start1, dur1, day2, start2, dur2) -> bool:
     if day1 != day2:
         return False
@@ -101,9 +99,8 @@ def events_overlap(day1, start1, dur1, day2, start2, dur2) -> bool:
     return start1 < end2 and start2 < end1
 
 
-# ============================================================
+
 # Helper: Build conflict adjacency (event → set of conflicting event IDs)
-# ============================================================
 def build_conflict_adjacency(conflict_pairs: pd.DataFrame,
                               relevant_ids: set) -> dict:
     """
@@ -129,9 +126,8 @@ def build_conflict_adjacency(conflict_pairs: pd.DataFrame,
     return dict(adj), weights
 
 
-# ============================================================
+
 # Clash Scoring Function
-# ============================================================
 def compute_clash_score(assignment: dict,
                          event_info: dict,
                          conflict_adj: dict,
@@ -190,9 +186,8 @@ def compute_event_clash_contribution(event_id: str,
     return score
 
 
-# ============================================================
+
 # Algorithm 1: Greedy Assignment
-# ============================================================
 def greedy_assignment(disp_events: pd.DataFrame,
                        fixed_events: pd.DataFrame,
                        conflict_adj: dict,
@@ -304,9 +299,8 @@ def greedy_assignment(disp_events: pd.DataFrame,
     return assignment, pd.DataFrame(assignment_details), total_clash
 
 
-# ============================================================
+
 # Algorithm 2: Local Search (Swap Improvement)
-# ============================================================
 def local_search(assignment: dict,
                   event_info: dict,
                   conflict_adj: dict,
@@ -416,9 +410,8 @@ def local_search(assignment: dict,
     return assignment, iteration_log
 
 
-# ============================================================
+
 # Lunch Break Analysis post-heuristic
-# ============================================================
 def compute_lunch_feasibility(assignment: dict,
                                disp_events: pd.DataFrame,
                                fixed_events: pd.DataFrame,
@@ -474,9 +467,8 @@ def compute_lunch_feasibility(assignment: dict,
     }
 
 
-# ============================================================
+
 # Main: Run heuristic for a scenario
-# ============================================================
 def run_heuristic_scenario(scenario: str,
                              events: pd.DataFrame,
                              conflict_pairs: pd.DataFrame,
@@ -661,9 +653,8 @@ def run_heuristic_scenario(scenario: str,
     }
 
 
-# ============================================================
+
 # Run both scenarios
-# ============================================================
 def run_all_heuristic_scenarios(data: dict,
                                  max_events: int = 2000,
                                  run_ls: bool = True,
