@@ -10,6 +10,7 @@ Usage:
     python main.py --skip-heuristic         # Skip heuristic (run MIP only)
     python main.py --mip-events 200         # Limit MIP to 200 displaced events
     python main.py --mip-time 120           # MIP solver time limit (seconds)
+    python main.py --mip-wholeclass-only    # MIP with only wholeclass
 
 Pipeline Steps:
     ─────────────────────────────────────────────────────────────────────────
@@ -214,6 +215,10 @@ def parse_args():
     parser.add_argument("--scenario",    default="both",
                         choices=["S1_9am5pm","S2_NoFriPM","both"],
                         help="Which scenario(s) to optimise (default: both)")
+    parser.add_argument("--mip-wholeclass-only", action="store_true",
+                        help="Revert MIP to original mode: WholeClass displaced events only "
+                             "(faster, ~1–5 min). Default is full two-phase MIP "
+                             "(WholeClass + SubGroup, ~10–30 min per scenario).")
     return parser.parse_args()
 
 
@@ -286,20 +291,61 @@ def build_model_comparison(mip_results: dict,
                 "Note":     note,
             })
 
-        # ── Scope ────────────────────────────────────────────────────────────
+        # ── Detect whether this is a full two-phase MIP result ───────────────
+        # Full MIP (mip_full.py) uses "N_Displaced_Total" and "N_Rescheduled_Total"
+        # Legacy MIP (mip_model.py) uses "N_Displaced_Events_MIP" and "N_Rescheduled_Events"
+        is_full_mip = "N_Displaced_Total" in ms
+
+        if is_full_mip:
+            mip_scope_label = "WholeClass + SubGroup (two-phase)"
+            mip_events_val  = _v(ms.get("N_Displaced_Total"), "int")
+            mip_reschedule_val = _v(ms.get("N_Rescheduled_Total"), "int")
+            mip_clash_before = _v(
+                (ms.get("N_Clash_Pairs_Before_P1") or 0) +
+                (ms.get("N_Clash_Pairs_Before_P2") or 0), "int"
+            )
+            mip_clash_after  = _v(
+                (ms.get("N_Clash_Pairs_After_P1") or 0) +
+                (ms.get("N_Clash_Pairs_After_P2") or 0), "int"
+            )
+            mip_objective    = _v(ms.get("Objective_Total"), "float")
+            mip_solve_time   = (
+                f"{ms.get('Phase1_Solve_Time_s','?')}s + "
+                f"{ms.get('Phase2_Solve_Time_s','?')}s"
+            )
+            mip_x_vars = (
+                f"{_v(ms.get('N_X_Variables_Phase1'),'int')} + "
+                f"{_v(ms.get('N_X_Variables_Phase2'),'int')}"
+            )
+            mip_z_vars = (
+                f"{_v(ms.get('N_Z_Variables_Phase1'),'int')} + "
+                f"{_v(ms.get('N_Z_Variables_Phase2'),'int')}"
+            )
+        else:
+            mip_scope_label    = "WholeClass only (legacy)"
+            mip_events_val     = _v(ms.get("N_Displaced_Events_MIP"), "int")
+            mip_reschedule_val = _v(ms.get("N_Rescheduled_Events"), "int")
+            mip_clash_before   = _v(ms.get("N_Clash_Pairs_Before"), "int")
+            mip_clash_after    = _v(ms.get("N_Clash_Pairs_After_MIP"), "int")
+            mip_objective      = _v(ms.get("Objective_Value"), "float")
+            mip_solve_time     = _v(ms.get("Solve_Time_s"), "float")
+            mip_x_vars         = _v(ms.get("N_X_Variables"), "int")
+            mip_z_vars         = _v(ms.get("N_Z_Variables"), "int")
+
+        # ── Scope ─────────────────────────────────────────────────────────────
         add("Event_Scope",
-            "WholeClass only",
+            mip_scope_label,
             "All displaced events",
-            "MIP restricts to WholeClass for tractability")
+            "MIP mode: two-phase covers all; use --mip-wholeclass-only for legacy mode")
 
         add("Events_Processed",
-            _v(ms.get("N_Displaced_Events_MIP"), "int"),
-            _v(hs.get("N_Displaced_Processed"),  "int"),
+            mip_events_val,
+            _v(hs.get("N_Displaced_Processed"), "int"),
             "Number of displaced events actually passed to each model")
 
         add("Events_Rescheduled",
-            _v(ms.get("N_Rescheduled_Events"), "int"),
-            _v(hs.get("N_Rescheduled"),        "int"),
+            mip_reschedule_val,
+            _v(hs.get("N_Rescheduled"), "int"),
             "Events that received a new timeslot in the solution")
 
         add("N_NoSlot",
@@ -314,19 +360,18 @@ def build_model_comparison(mip_results: dict,
 
         # ── Clash quality ─────────────────────────────────────────────────────
         add("Clash_Pairs_Before_Optimisation",
-            _v(ms.get("N_Clash_Pairs_Before"), "int"),
+            mip_clash_before,
             "N/A",
-            "disp–disp conflict pairs entering MIP (from conflict_pairs); "
-            "heuristic does not pre-count this")
+            "disp–disp conflict pairs entering MIP; heuristic does not pre-count this")
 
         add("Clash_Score_After",
-            _v(ms.get("Objective_Value"), "float"),
+            mip_objective,
             _v(hs.get("LocalSearch_Clash_Score"), "float"),
             "Weighted clash score (Σ shared_students for clashing disp–disp pairs); "
             "same metric — directly comparable")
 
         add("Clash_Pairs_After_Optimisation",
-            _v(ms.get("N_Clash_Pairs_After_MIP"), "int"),
+            mip_clash_after,
             "N/A",
             "Pairs where z[e1,e2]=1 after MIP solve; "
             "heuristic reports weighted score, not pair count")
@@ -354,26 +399,25 @@ def build_model_comparison(mip_results: dict,
             "OPTIMAL/FEASIBLE/INFEASIBLE for MIP; heuristic always produces a solution")
 
         add("Solve_Time_s",
-            _v(ms.get("Solve_Time_s"), "float"),
+            mip_solve_time,
             "N/A",
-            "Wall-clock solver time (MIP only; heuristic runtime not tracked here)")
+            "Wall-clock solver time (MIP only; two-phase shows Phase1s + Phase2s)")
 
         add("MIP_X_Variables",
-            _v(ms.get("N_X_Variables"), "int"),
+            mip_x_vars,
             "N/A",
-            "Number of binary assignment variables in the MIP")
+            "Binary assignment variables (two-phase: Phase1 + Phase2 counts)")
 
         add("MIP_Z_Variables",
-            _v(ms.get("N_Z_Variables"), "int"),
+            mip_z_vars,
             "N/A",
-            "Number of binary clash indicator variables in the MIP")
+            "Binary clash indicator variables (two-phase: Phase1 + Phase2 counts)")
 
         # ── Lunch feasibility ─────────────────────────────────────────────────
         add("Lunch_Free_Pct",
-            "N/A",
+            _v(ms.get("Lunch_Free_Pct"), "float"),
             _v(hs.get("Lunch_Free_Pct"), "float"),
-            "% students with free 12-14 lunch slot after rescheduling "
-            "(MIP post-metrics not stored in main results dict)")
+            "% students with free 12-14 lunch slot after rescheduling")
 
         add("Slot_Balance_CV",
             "N/A",
@@ -390,8 +434,7 @@ def build_model_comparison(mip_results: dict,
     for sc in scenarios:
         sc_df = df[df["Scenario"] == sc][["Metric", "MIP", "Heuristic"]]
         print(f"\n── Scenario: {sc} ──")
-        # Column widths
-        col_w = [42, 22, 22]
+        col_w = [42, 30, 22]
         header = (f"{'Metric':<{col_w[0]}}  {'MIP':>{col_w[1]}}  {'Heuristic':>{col_w[2]}}")
         print(header)
         print("-" * (sum(col_w) + 4))
@@ -400,7 +443,7 @@ def build_model_comparison(mip_results: dict,
                   f"{str(r['Heuristic']):>{col_w[2]}}")
     print("=" * 90)
     print("Note: Clash_Score_After uses the same weighted disp–disp metric for both models.")
-    print("      MIP scope = WholeClass displaced events only; Heuristic = all displaced.")
+    print("      Default MIP = two-phase (WholeClass + SubGroup); use --mip-wholeclass-only for legacy.")
 
     # ── Save CSV ───────────────────────────────────────────────────────────────
     out_path = save_dir / "model_comparison.csv"
@@ -564,37 +607,63 @@ def main():
     # ── Step 3: MIP Model ────────────────────────────────────────────────────
     mip_results = {}
     if not args.skip_mip:
-        print("\n>>> STEP 3: MIP OPTIMISATION (Xpress)")
-        try:
-            from mip_model import run_all_mip_scenarios, run_mip_scenario
-            scenarios_to_run = (
-                ["S1_9am5pm", "S2_NoFriPM"] if args.scenario == "both"
-                else [args.scenario]
-            )
-            if args.scenario == "both":
-                mip_results = run_all_mip_scenarios(
-                    data,
-                    max_events=args.mip_events,
-                    time_limit=args.mip_time,
-                    out_dir=run_dir,
-                )
-            else:
-                res = run_mip_scenario(
-                    scenario=args.scenario,
-                    events=data["events"],
-                    conflict_pairs=data.get("conflict_pairs"),
-                    max_events=args.mip_events,
-                    time_limit=args.mip_time,
-                    out_dir=run_dir,
-                )
-                mip_results[args.scenario] = res
-
-        except ImportError as e:
-            print(f"  [WARNING] Could not import mip_model: {e}")
-            print("  [WARNING] Make sure FICO Xpress is installed.")
-        except Exception as e:
-            print(f"  [ERROR] MIP model failed: {e}")
-            import traceback; traceback.print_exc()
+        if args.mip_wholeclass_only:
+            # Legacy mode: WholeClass displaced events only (fast, original behaviour)
+            print("\n>>> STEP 3: MIP OPTIMISATION — WholeClass-only mode (--mip-wholeclass-only)")
+            try:
+                from mip_model import run_all_mip_scenarios, run_mip_scenario
+                if args.scenario == "both":
+                    mip_results = run_all_mip_scenarios(
+                        data,
+                        max_events=args.mip_events,
+                        time_limit=args.mip_time,
+                        out_dir=run_dir,
+                    )
+                else:
+                    res = run_mip_scenario(
+                        scenario=args.scenario,
+                        events=data["events"],
+                        conflict_pairs=data.get("conflict_pairs"),
+                        max_events=args.mip_events,
+                        time_limit=args.mip_time,
+                        out_dir=run_dir,
+                    )
+                    mip_results[args.scenario] = res
+            except ImportError as e:
+                print(f"  [WARNING] Could not import mip_model: {e}")
+                print("  [WARNING] Make sure FICO Xpress is installed.")
+            except Exception as e:
+                print(f"  [ERROR] MIP model failed: {e}")
+                import traceback; traceback.print_exc()
+        else:
+            # Default: Two-phase full MIP (WholeClass + SubGroup)
+            print("\n>>> STEP 3: MIP OPTIMISATION — Full two-phase mode (WholeClass + SubGroup)")
+            print("    (Use --mip-wholeclass-only to revert to the faster single-phase mode)")
+            try:
+                from mip_full import run_all_mip_full_scenarios, run_mip_full_scenario
+                if args.scenario == "both":
+                    mip_results = run_all_mip_full_scenarios(
+                        data,
+                        max_events=args.mip_events,
+                        time_limit=args.mip_time,
+                        out_dir=run_dir,
+                    )
+                else:
+                    res = run_mip_full_scenario(
+                        scenario=args.scenario,
+                        events=data["events"],
+                        conflict_pairs=data.get("conflict_pairs"),
+                        max_events=args.mip_events,
+                        time_limit=args.mip_time,
+                        out_dir=run_dir,
+                    )
+                    mip_results[args.scenario] = res
+            except ImportError as e:
+                print(f"  [WARNING] Could not import mip_full: {e}")
+                print("  [WARNING] Make sure FICO Xpress is installed.")
+            except Exception as e:
+                print(f"  [ERROR] MIP (full) model failed: {e}")
+                import traceback; traceback.print_exc()
     else:
         print("\n>>> STEP 3: MIP skipped (--skip-mip)")
 
