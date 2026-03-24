@@ -30,9 +30,8 @@ OUT_DIR.mkdir(exist_ok=True)
 
 DAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
-# ============================================================
+
 # 1. Timeslot Utilisation
-# ============================================================
 def compute_timeslot_utilisation(events: pd.DataFrame, label: str = "Baseline") -> pd.DataFrame:
     """
     For each (Day, Start_Hour) timeslot, count the number of events scheduled there.
@@ -68,9 +67,7 @@ def compute_timeslot_utilisation(events: pd.DataFrame, label: str = "Baseline") 
     return grp
 
 
-# ============================================================
 # 2. Room Utilisation
-# ============================================================
 def compute_room_utilisation(events: pd.DataFrame,
                               rooms: pd.DataFrame,
                               label: str = "Baseline") -> pd.DataFrame:
@@ -100,10 +97,10 @@ def compute_room_utilisation(events: pd.DataFrame,
     merged["Fill_Rate"] = (merged["Event_Size"] / merged["Capacity"]).clip(0, 1)
 
     agg_dict = {
-        "Num_Events":         ("Event_ID", "count"),
-        "Avg_Fill_Rate":      ("Fill_Rate", "mean"),
+        "Num_Events":           ("Event_ID", "count"),
+        "Avg_Fill_Rate":        ("Fill_Rate", "mean"),
         "Total_Student_Events": ("Event_Size", "sum"),
-        "Capacity":           ("Capacity", "first"),
+        "Capacity":             ("Capacity", "first"),
     }
     # Only include Campus/Room_Type if the merge brought them in
     if "Campus_y" in merged.columns:
@@ -127,9 +124,7 @@ def compute_room_utilisation(events: pd.DataFrame,
     return room_stats
 
 
-# ============================================================
 # 3. Displaced Event Summary
-# ============================================================
 def compute_displaced_summary(events: pd.DataFrame) -> pd.DataFrame:
     """
     Summarise the number and proportion of displaced events under each scenario.
@@ -148,12 +143,12 @@ def compute_displaced_summary(events: pd.DataFrame) -> pd.DataFrame:
         pct  = 100 * len(disp) / total
 
         records.append({
-            "Scenario": name,
-            "Total_Events": total,
-            "Displaced_Events": len(disp),
-            "Displaced_Pct": round(pct, 2),
-            "Displaced_WholeClass": int(disp["WholeClass"].sum()),
-            "Displaced_SubGroup": int((~disp["WholeClass"]).sum()),
+            "Scenario":                name,
+            "Total_Events":            total,
+            "Displaced_Events":        len(disp),
+            "Displaced_Pct":           round(pct, 2),
+            "Displaced_WholeClass":    int(disp["WholeClass"].sum()),
+            "Displaced_SubGroup":      int((~disp["WholeClass"]).sum()),
             "Displaced_Unique_Modules": disp["Module_Code"].nunique(),
         })
 
@@ -161,22 +156,20 @@ def compute_displaced_summary(events: pd.DataFrame) -> pd.DataFrame:
         for day in DAY_ORDER:
             day_disp = disp[disp["Day"] == day]
             records.append({
-                "Scenario": f"{name}_{day}",
-                "Total_Events": len(events[events["Day"] == day]),
-                "Displaced_Events": len(day_disp),
-                "Displaced_Pct": round(
+                "Scenario":                f"{name}_{day}",
+                "Total_Events":            len(events[events["Day"] == day]),
+                "Displaced_Events":        len(day_disp),
+                "Displaced_Pct":           round(
                     100 * len(day_disp) / max(len(events[events["Day"] == day]), 1), 2),
-                "Displaced_WholeClass": int(day_disp["WholeClass"].sum()),
-                "Displaced_SubGroup": int((~day_disp["WholeClass"]).sum()),
+                "Displaced_WholeClass":    int(day_disp["WholeClass"].sum()),
+                "Displaced_SubGroup":      int((~day_disp["WholeClass"]).sum()),
                 "Displaced_Unique_Modules": day_disp["Module_Code"].nunique(),
             })
 
     return pd.DataFrame(records)
 
 
-# ============================================================
 # 4. Lunch Break Feasibility
-# ============================================================
 def compute_lunch_break_feasibility(events: pd.DataFrame,
                                      student_events: pd.DataFrame,
                                      scenario_displaced_col: str = "Displaced_S0"
@@ -202,7 +195,7 @@ def compute_lunch_break_feasibility(events: pd.DataFrame,
     -------
     dict with keys:
         total_students, lunch_free_students, lunch_free_pct,
-        by_day (dict: day → pct of students free at lunch)
+        by_day (dict: day → pct of students free at lunch on that specific day)
     """
     # In-window events (not displaced)
     in_window_events = events[~events[scenario_displaced_col]].copy()
@@ -222,7 +215,7 @@ def compute_lunch_break_feasibility(events: pd.DataFrame,
     total = len(all_students)
     free  = len(students_free)
 
-    # By day
+    # By day: what fraction of students are free at lunch on each specific day
     by_day = {}
     for day in DAY_ORDER:
         day_lunch_events = in_window_events[
@@ -242,9 +235,29 @@ def compute_lunch_break_feasibility(events: pd.DataFrame,
     }
 
 
-# ============================================================
 # 5. Clash Detection (schedule-based, not MIP-based)
-# ============================================================
+def _share_module_code(code1: str, code2: str) -> bool:
+    """
+    Return True if code1 and code2 share at least one module identifier.
+
+    Some events are jointly taught and carry a comma-separated Module_Code
+    such as "BVMS08060_SS1_YR_2024/5, BVMS08061_SS1_YR_2024/5". A student
+    may be registered to both the joint event and the individual module event,
+    which would otherwise be treated as two different modules and generate a
+    spurious clash. This function treats any overlap in module code sets as
+    "same module", so such pairs are skipped during clash detection.
+
+    Examples
+    --------
+    _share_module_code("A, B", "A")    → True  (shared: A)
+    _share_module_code("A, B", "B, C") → True  (shared: B)
+    _share_module_code("A", "B")       → False
+    """
+    set1 = {c.strip() for c in code1.split(",")}
+    set2 = {c.strip() for c in code2.split(",")}
+    return bool(set1 & set2)
+
+
 def detect_clashes(events: pd.DataFrame,
                    student_events: pd.DataFrame,
                    scenario_displaced_col: str = "Displaced_S0") -> dict:
@@ -261,6 +274,12 @@ def detect_clashes(events: pd.DataFrame,
       2. Check if any two events from DIFFERENT modules for the same student overlap.
       3. Cross-semester comparisons are excluded (Sem1 vs Sem2 can't clash).
 
+    Joint module handling:
+      Some events carry a comma-separated Module_Code (e.g. "MOD_A, MOD_B"), meaning
+      one session counts toward multiple modules. Two events are treated as the same
+      module if their module code sets share at least one identifier, preventing false
+      clashes between a joint event and its constituent single-module counterpart.
+
     Severity levels:
       - Severity 3 (most severe): WholeClass vs WholeClass
       - Severity 2: WholeClass vs SubGroup
@@ -273,12 +292,12 @@ def detect_clashes(events: pd.DataFrame,
         students_with_clashes, student_clash_pct
     """
     in_window = events[~events[scenario_displaced_col]][
-        ["Event_ID","Module_Code","Day","Start_Hour","End_Hour","WholeClass","Semester"]
+        ["Event_ID", "Module_Code", "Day", "Start_Hour", "End_Hour", "WholeClass", "Semester"]
     ].copy()
 
     # Merge student-events with event times
     se_times = student_events.merge(in_window, on="Event_ID", how="inner",
-                                    suffixes=("_st","_ev"))
+                                    suffixes=("_st", "_ev"))
 
     # Use Semester from events (Semester_ev after merge)
     if "Semester_ev" in se_times.columns:
@@ -289,9 +308,8 @@ def detect_clashes(events: pd.DataFrame,
         se_times["Sem"] = "Semester 1"
 
     # Deduplicate to unique weekly recurring timeslots per (student, module, day, semester)
-    # Group by (AnonID, Module_Code, Day, Start_Hour, End_Hour, Sem) and take first row
     weekly_slots = (
-        se_times.groupby(["AnonID","Module_Code","Day","Start_Hour","End_Hour","Sem","WholeClass"])
+        se_times.groupby(["AnonID", "Module_Code", "Day", "Start_Hour", "End_Hour", "Sem", "WholeClass"])
         .first()
         .reset_index()
     )
@@ -303,17 +321,15 @@ def detect_clashes(events: pd.DataFrame,
     total_pairs = 0
     sev = {1: 0, 2: 0, 3: 0}
 
-    for (student, day, sem), grp in weekly_slots.groupby(["AnonID","Day","Sem"]):
-        # Events for this student on this day in this semester
-        # Each row represents a unique recurring module timeslot
-        events_list = grp[["Module_Code","Start_Hour","End_Hour","WholeClass"]].values.tolist()
+    for (student, day, sem), grp in weekly_slots.groupby(["AnonID", "Day", "Sem"]):
+        events_list = grp[["Module_Code", "Start_Hour", "End_Hour", "WholeClass"]].values.tolist()
         n = len(events_list)
         for i in range(n):
             for j in range(i + 1, n):
                 e1 = events_list[i]
                 e2 = events_list[j]
-                # Skip if same module (e.g., lecture + tutorial from same module)
-                if e1[0] == e2[0]:
+                # Skip if same module or jointly-taught siblings (set-intersection check)
+                if _share_module_code(e1[0], e2[0]):
                     continue
                 # Check time overlap
                 if e1[1] < e2[2] and e2[1] < e1[2]:
@@ -329,27 +345,26 @@ def detect_clashes(events: pd.DataFrame,
 
     total_students = student_events["AnonID"].nunique()
     return {
-        "total_clash_pairs":      total_pairs,
-        "severity_3_WC_WC":       sev[3],
-        "severity_2_WC_SG":       sev[2],
-        "severity_1_SG_SG":       sev[1],
-        "students_with_clashes":  len(students_with_any_clash),
-        "student_clash_pct":      round(100 * len(students_with_any_clash) / max(total_students, 1), 2),
+        "total_clash_pairs":     total_pairs,
+        "severity_3_WC_WC":      sev[3],
+        "severity_2_WC_SG":      sev[2],
+        "severity_1_SG_SG":      sev[1],
+        "students_with_clashes": len(students_with_any_clash),
+        "student_clash_pct":     round(100 * len(students_with_any_clash) / max(total_students, 1), 2),
     }
 
 
-# ============================================================
 # 6a. NO_SLOT Feasibility (Q1/Q2)
-# ============================================================
 def compute_noslot_feasibility(events: pd.DataFrame) -> pd.DataFrame:
     """
     For each scenario, determine which displaced events have NO valid timeslot,
     i.e. their duration is too long to fit within the allowed teaching window.
 
     Logic mirrors heuristic_model.get_allowed_slots():
-      S1_9am5pm  : earliest start = 9am, must end ≤ 17:00 → max duration = 8h = 480 min
-      S2_NoFriPM : earliest start = 9am, must end ≤ 18:00 → max duration = 9h = 540 min
-                   (Friday PM restriction only affects START hour ≥ 12, not max duration)
+      S1_9am5pm  : earliest start = 9am, must end <= 17:00 → max duration = 8h = 480 min
+      S2_NoFriPM : earliest start = 9am, must end <= 18:00 → max duration = 9h = 540 min
+                   (Friday events must finish by 12:00, but Mon-Thu still allow up to 9h,
+                   so the binding constraint for NO_SLOT remains 540 min)
 
     Returns
     -------
@@ -360,7 +375,7 @@ def compute_noslot_feasibility(events: pd.DataFrame) -> pd.DataFrame:
     # Thresholds: max feasible duration (minutes) per scenario
     WINDOW_MAX_DUR = {
         "S1_9am5pm":  480.0,   # 17 - 9 = 8 h
-        "S2_NoFriPM": 540.0,   # 18 - 9 = 9 h
+        "S2_NoFriPM": 540.0,   # 18 - 9 = 9 h (Mon-Thu window; displaced Fri events can move to Mon-Thu)
     }
     COL_MAP = {"S1_9am5pm": "Displaced_S1", "S2_NoFriPM": "Displaced_S2"}
 
@@ -391,7 +406,7 @@ def compute_noslot_feasibility(events: pd.DataFrame) -> pd.DataFrame:
                        .head(10)
             )
             for etype, cnt in by_type.items():
-                row[f"NoSlot_{etype.replace(' ','_')}"] = int(cnt)
+                row[f"NoSlot_{etype.replace(' ', '_')}"] = int(cnt)
 
         records.append(row)
         print(f"  {scenario}: {n_ns:,}/{n_total:,} displaced events have NO valid slot "
@@ -400,9 +415,7 @@ def compute_noslot_feasibility(events: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-# ============================================================
 # 6b. Hourly Load Comparison by Day (Q5)
-# ============================================================
 def compute_hourly_load_comparison(events: pd.DataFrame) -> pd.DataFrame:
     """
     Compute the number of events scheduled in each (Day, Start_Hour) slot
@@ -446,9 +459,7 @@ def compute_hourly_load_comparison(events: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-# ============================================================
-# 6. Utilisation Comparison Across Scenarios
-# ============================================================
+# 6c. Utilisation Comparison Across Scenarios
 def compute_utilisation_comparison(events: pd.DataFrame) -> pd.DataFrame:
     """
     Compare room/timeslot utilisation across baseline and two scenarios.
@@ -475,17 +486,17 @@ def compute_utilisation_comparison(events: pd.DataFrame) -> pd.DataFrame:
             avail_slots = 9 * 5      # 9am-6pm × 5 days = 45 slots
         elif name == "S1_9am5pm":
             avail_slots = 8 * 5      # 9am-5pm × 5 days = 40 slots
-        else:                         # S2: Mon-Thu 9am-6pm (9×4=36) + Fri 9am-12pm (3)
+        else:                         # S2: Mon-Thu 9am-6pm (9×4=36) + Fri 9am-12pm (3 slots ending by 12:00)
             avail_slots = 9 * 4 + 3  # = 39 slots
 
         total_avail_room_slots = avail_slots * total_rooms
 
         # Room-slot utilisation: count unique (Room, Day, Start_Hour) occupied
-        occupied = in_window.dropna(subset=["Room","Day","Start_Hour"])
-        occupied_pairs = occupied.drop_duplicates(subset=["Room","Day","Start_Hour"])
+        occupied = in_window.dropna(subset=["Room", "Day", "Start_Hour"])
+        occupied_pairs = occupied.drop_duplicates(subset=["Room", "Day", "Start_Hour"])
         n_occupied_slots = len(occupied_pairs)
 
-        event_hours = (in_window["Duration_min"] / 60.0).sum()
+        event_hours     = (in_window["Duration_min"] / 60.0).sum()
         student_contact = (in_window["Event_Size"] * in_window["Duration_min"] / 60.0).sum()
 
         records.append({
@@ -503,9 +514,7 @@ def compute_utilisation_comparison(events: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-# ============================================================
 # 7. Main Baseline Analysis
-# ============================================================
 def run_baseline_analysis(data: dict, out_dir: Path = None) -> dict:
     """
     Run all baseline analyses and save results.
@@ -533,15 +542,14 @@ def run_baseline_analysis(data: dict, out_dir: Path = None) -> dict:
 
     results = {}
 
-    # --- Timeslot utilisation (baseline) ---
+    # Timeslot utilisation (baseline)
     print("\n[baseline] Computing timeslot utilisation...")
     ts_util = compute_timeslot_utilisation(events, label="Baseline")
     ts_util.to_csv(save_dir / "baseline_timeslot_utilisation.csv", index=False)
     results["timeslot_util"] = ts_util
+    print(f"  Peak timeslot: {ts_util.loc[ts_util['Num_Events'].idxmax(), ['Day', 'Start_Hour', 'Num_Events']].to_dict()}")
 
-    print(f"  Peak timeslot: {ts_util.loc[ts_util['Num_Events'].idxmax(), ['Day','Start_Hour','Num_Events']].to_dict()}")
-
-    # --- Room utilisation (baseline) ---
+    # Room utilisation (baseline)
     print("\n[baseline] Computing room utilisation...")
     room_util = compute_room_utilisation(events, rooms, label="Baseline")
     room_util.to_csv(save_dir / "baseline_room_utilisation.csv", index=False)
@@ -549,7 +557,7 @@ def run_baseline_analysis(data: dict, out_dir: Path = None) -> dict:
     print(f"  Avg room fill rate: {room_util['Avg_Fill_Rate'].mean():.2%}")
     print(f"  Rooms with > 90% fill: {(room_util['Avg_Fill_Rate'] > 0.9).sum():,}")
 
-    # --- Displaced events summary ---
+    # Displaced events summary
     print("\n[baseline] Computing displaced events summary...")
     displaced_summary = compute_displaced_summary(events)
     displaced_summary.to_csv(save_dir / "scenario_displaced_summary.csv", index=False)
@@ -558,7 +566,7 @@ def run_baseline_analysis(data: dict, out_dir: Path = None) -> dict:
         ["Scenario", "Displaced_Events", "Displaced_Pct", "Displaced_WholeClass"]
     ].to_string(index=False))
 
-    # --- Lunch break feasibility ---
+    # Lunch break feasibility
     print("\n[baseline] Computing lunch break feasibility...")
     lunch_records = []
     for col, name in [("Displaced_S0", "S0_Baseline"),
@@ -581,7 +589,7 @@ def run_baseline_analysis(data: dict, out_dir: Path = None) -> dict:
     lunch_df.to_csv(save_dir / "lunch_break_analysis.csv", index=False)
     results["lunch_break"] = lunch_df
 
-    # --- Clash detection (on current timetable, no rescheduling) ---
+    # Clash detection (on current timetable, no rescheduling)
     print("\n[baseline] Detecting clashes in current timetable...")
     clash_records = []
     for col, name in [("Displaced_S0", "S0_Baseline"),
@@ -598,26 +606,25 @@ def run_baseline_analysis(data: dict, out_dir: Path = None) -> dict:
     clash_df.to_csv(save_dir / "clash_analysis.csv", index=False)
     results["clashes"] = clash_df
 
-    # --- Utilisation comparison ---
+    # Utilisation comparison
     print("\n[baseline] Computing utilisation comparison...")
     util_comp = compute_utilisation_comparison(events)
     util_comp.to_csv(save_dir / "utilisation_comparison.csv", index=False)
     results["utilisation_comparison"] = util_comp
-    print(util_comp[["Scenario","In_Window_Events","Displaced_Events",
+    print(util_comp[["Scenario", "In_Window_Events", "Displaced_Events",
                      "Room_Utilisation_Pct"]].to_string(index=False))
 
-    # --- Q1/Q2: NO_SLOT feasibility (events too long to fit any slot) ---
+    # Q1/Q2: NO_SLOT feasibility (events too long to fit any slot)
     print("\n[baseline] Computing NO_SLOT feasibility per scenario...")
     noslot_df = compute_noslot_feasibility(events)
     noslot_df.to_csv(save_dir / "noslot_feasibility.csv", index=False)
     results["noslot_feasibility"] = noslot_df
 
-    # --- Q5: Hourly load by day across scenarios ---
+    # Q5: Hourly load by day across scenarios
     print("\n[baseline] Computing hourly load comparison by day...")
     hourly_load = compute_hourly_load_comparison(events)
     hourly_load.to_csv(save_dir / "hourly_load_comparison.csv", index=False)
     results["hourly_load"] = hourly_load
-    # Quick summary: peak slot per scenario
     for sc in ["S0_Baseline", "S1_9am5pm", "S2_NoFriPM"]:
         sc_df = hourly_load[hourly_load["Scenario"] == sc]
         if len(sc_df):
