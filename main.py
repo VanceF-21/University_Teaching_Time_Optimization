@@ -218,6 +218,202 @@ def parse_args():
 
 
 
+# Model Comparison
+def build_model_comparison(mip_results: dict,
+                            heuristic_results: dict,
+                            run_dir: Path = None) -> pd.DataFrame:
+    """
+    Build a side-by-side comparison table of MIP vs Heuristic metrics
+    for each scenario and save to model_comparison.csv.
+
+    Metrics included
+    ────────────────
+    Scope
+      • Events_Processed      – events actually handled by each model
+      • Events_Rescheduled    – events that received a new timeslot
+      • N_NoSlot              – events with no feasible timeslot (heuristic only)
+      • Event_Scope_Note      – reminder that MIP = WholeClass only
+
+    Clash quality  (same weighted disp–disp metric post-Fix-2)
+      • Clash_Pairs_Before    – conflict pairs that *could* clash before optimisation
+      • Clash_Score_After     – weighted clash score after optimisation
+      • Clash_Pairs_After     – clash pairs with z=1 / score>0 after optimisation
+
+    Heuristic-only improvement
+      • Greedy_Clash_Score    – baseline before local search
+      • Improvement_Pct       – % improvement from greedy → local search
+
+    Feasibility / quality
+      • Solve_Status          – solver status (MIP) / FEASIBLE (heuristic)
+      • Solve_Time_s          – wall-clock time (MIP only; heuristic uses N/A)
+      • Lunch_Free_Pct        – % students with free 12-14 lunch slot
+
+    Returns
+    ───────
+    Long-format DataFrame: Scenario, Metric, MIP, Heuristic, Note
+    Also saves model_comparison.csv to run_dir.
+    """
+    save_dir = run_dir or OUT_DIR
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    scenarios = ["S1_9am5pm", "S2_NoFriPM"]
+    rows = []
+
+    def _v(val, fmt=None):
+        """Format a value, returning 'N/A' for None."""
+        if val is None:
+            return "N/A"
+        if fmt == "int":
+            return int(val)
+        if fmt == "pct":
+            return f"{float(val):.1f}%"
+        if fmt == "float":
+            return round(float(val), 1)
+        return val
+
+    for sc in scenarios:
+        mr = (mip_results or {}).get(sc, {})
+        hr = (heuristic_results or {}).get(sc, {})
+        ms = mr.get("summary", {}) if mr else {}
+        hs = hr.get("summary", {}) if hr else {}
+
+        def add(metric, mip_val, heur_val, note=""):
+            rows.append({
+                "Scenario": sc,
+                "Metric":   metric,
+                "MIP":      mip_val,
+                "Heuristic": heur_val,
+                "Note":     note,
+            })
+
+        # ── Scope ────────────────────────────────────────────────────────────
+        add("Event_Scope",
+            "WholeClass only",
+            "All displaced events",
+            "MIP restricts to WholeClass for tractability")
+
+        add("Events_Processed",
+            _v(ms.get("N_Displaced_Events_MIP"), "int"),
+            _v(hs.get("N_Displaced_Processed"),  "int"),
+            "Number of displaced events actually passed to each model")
+
+        add("Events_Rescheduled",
+            _v(ms.get("N_Rescheduled_Events"), "int"),
+            _v(hs.get("N_Rescheduled"),        "int"),
+            "Events that received a new timeslot in the solution")
+
+        add("N_NoSlot",
+            "N/A",
+            _v(hs.get("N_NoSlot"), "int"),
+            "Events with duration too long for any allowed slot (heuristic only)")
+
+        add("N_NoSlot_WholeClass",
+            "N/A",
+            _v(hs.get("N_NoSlot_WholeClass"), "int"),
+            "WholeClass subset of NO_SLOT events")
+
+        # ── Clash quality ─────────────────────────────────────────────────────
+        add("Clash_Pairs_Before_Optimisation",
+            _v(ms.get("N_Clash_Pairs_Before"), "int"),
+            "N/A",
+            "disp–disp conflict pairs entering MIP (from conflict_pairs); "
+            "heuristic does not pre-count this")
+
+        add("Clash_Score_After",
+            _v(ms.get("Objective_Value"), "float"),
+            _v(hs.get("LocalSearch_Clash_Score"), "float"),
+            "Weighted clash score (Σ shared_students for clashing disp–disp pairs); "
+            "same metric — directly comparable")
+
+        add("Clash_Pairs_After_Optimisation",
+            _v(ms.get("N_Clash_Pairs_After_MIP"), "int"),
+            "N/A",
+            "Pairs where z[e1,e2]=1 after MIP solve; "
+            "heuristic reports weighted score, not pair count")
+
+        # ── Heuristic-only improvement ────────────────────────────────────────
+        add("Greedy_Clash_Score",
+            "N/A",
+            _v(hs.get("Greedy_Clash_Score"), "float"),
+            "Clash score after greedy phase, before local search (heuristic only)")
+
+        add("LocalSearch_Improvement_Pct",
+            "N/A",
+            _v(hs.get("Improvement_Pct"), "float"),
+            "(Greedy − LocalSearch) / Greedy × 100%; measures local search gain")
+
+        add("Greedy_ClashFree_WholeClass_Pct",
+            "N/A",
+            _v(hs.get("Greedy_ClashFree_WholeClass_Pct"), "float"),
+            "% of WholeClass events placed clash-free by greedy phase")
+
+        # ── Feasibility / solver quality ──────────────────────────────────────
+        add("Solve_Status",
+            _v(ms.get("Solve_Status")),
+            "FEASIBLE" if hs else "N/A",
+            "OPTIMAL/FEASIBLE/INFEASIBLE for MIP; heuristic always produces a solution")
+
+        add("Solve_Time_s",
+            _v(ms.get("Solve_Time_s"), "float"),
+            "N/A",
+            "Wall-clock solver time (MIP only; heuristic runtime not tracked here)")
+
+        add("MIP_X_Variables",
+            _v(ms.get("N_X_Variables"), "int"),
+            "N/A",
+            "Number of binary assignment variables in the MIP")
+
+        add("MIP_Z_Variables",
+            _v(ms.get("N_Z_Variables"), "int"),
+            "N/A",
+            "Number of binary clash indicator variables in the MIP")
+
+        # ── Lunch feasibility ─────────────────────────────────────────────────
+        add("Lunch_Free_Pct",
+            "N/A",
+            _v(hs.get("Lunch_Free_Pct"), "float"),
+            "% students with free 12-14 lunch slot after rescheduling "
+            "(MIP post-metrics not stored in main results dict)")
+
+        add("Slot_Balance_CV",
+            "N/A",
+            _v(hs.get("Slot_Balance_CV"), "float"),
+            "Coefficient of variation of events-per-slot (heuristic only); "
+            "lower = more balanced distribution")
+
+    df = pd.DataFrame(rows)
+
+    # ── Console print ─────────────────────────────────────────────────────────
+    print("\n" + "=" * 90)
+    print("MODEL COMPARISON: MIP vs Heuristic")
+    print("=" * 90)
+    for sc in scenarios:
+        sc_df = df[df["Scenario"] == sc][["Metric", "MIP", "Heuristic"]]
+        print(f"\n── Scenario: {sc} ──")
+        # Column widths
+        col_w = [42, 22, 22]
+        header = (f"{'Metric':<{col_w[0]}}  {'MIP':>{col_w[1]}}  {'Heuristic':>{col_w[2]}}")
+        print(header)
+        print("-" * (sum(col_w) + 4))
+        for _, r in sc_df.iterrows():
+            print(f"{r['Metric']:<{col_w[0]}}  {str(r['MIP']):>{col_w[1]}}  "
+                  f"{str(r['Heuristic']):>{col_w[2]}}")
+    print("=" * 90)
+    print("Note: Clash_Score_After uses the same weighted disp–disp metric for both models.")
+    print("      MIP scope = WholeClass displaced events only; Heuristic = all displaced.")
+
+    # ── Save CSV ───────────────────────────────────────────────────────────────
+    out_path = save_dir / "model_comparison.csv"
+    df.to_csv(out_path, index=False)
+    try:
+        display_path = out_path.relative_to(OUT_DIR.parent)
+    except ValueError:
+        display_path = out_path
+    print(f"\n[comparison] Saved → {display_path}")
+
+    return df
+
+
 # Final Summary
 def print_final_summary(baseline_results: dict,
                           mip_results: dict,
@@ -450,6 +646,11 @@ def main():
     # ── Step 6: Final Summary ─────────────────────────────────────────────────
     print("\n>>> STEP 6: FINAL SUMMARY")
     print_final_summary(baseline_results, mip_results, heuristic_results, run_dir=run_dir)
+
+    # ── Step 6b: MIP vs Heuristic comparison table ───────────────────────────
+    if mip_results or heuristic_results:
+        print("\n>>> STEP 6b: MODEL COMPARISON (MIP vs Heuristic)")
+        build_model_comparison(mip_results, heuristic_results, run_dir=run_dir)
 
     elapsed = time.time() - t_start
     print(f"\nTotal elapsed time: {elapsed:.0f}s ({elapsed/60:.1f} min)")
