@@ -500,7 +500,7 @@ def plot_timeslot_load_comparison(events: pd.DataFrame, heuristic_results: dict)
         pivot = pivot.reindex(index=DAY_ORDER, columns=hours, fill_value=0)
         sns.heatmap(pivot, ax=ax_before, cmap="YlOrRd", annot=True, fmt="d",
                     linewidths=0.5, cbar_kws={"label": "Events"})
-        ax_before.set_title(f"Baseline Schedule — {title_suffix}", fontsize=11)
+        ax_before.set_title(f"Original Schedule — {title_suffix}", fontsize=11)
         ax_before.set_xlabel("Start Hour")
         ax_before.set_ylabel("Day")
         ax_before.set_xticklabels([f"{h}" for h in hours], rotation=45)

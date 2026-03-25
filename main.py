@@ -10,7 +10,6 @@ Usage:
     python main.py --skip-heuristic         # Skip heuristic (run MIP only)
     python main.py --mip-events 200         # Limit MIP to 200 displaced events
     python main.py --mip-time 120           # MIP solver time limit (seconds)
-    python main.py --mip-wholeclass-only    # MIP with only wholeclass
 
 Pipeline Steps:
     ─────────────────────────────────────────────────────────────────────────
@@ -167,57 +166,30 @@ def main():
 
 # Private step helpers
 def _run_mip(args, data: dict, run_dir: Path) -> dict:
-    """Run MIP optimisation (wholeclass-only or full two-phase) and return results."""
+    """Run two-phase MIP optimisation (WholeClass + SubGroup) and return results."""
     mip_results = {}
-
-    if args.mip_wholeclass_only:
-        print("\n>>> STEP 3: MIP OPTIMISATION — WholeClass-only mode (--mip-wholeclass-only)")
-        try:
-            from mip_model import run_all_mip_scenarios, run_mip_scenario
-            if args.scenario == "both":
-                mip_results = run_all_mip_scenarios(
-                    data, max_events=args.mip_events, time_limit=args.mip_time,
-                    out_dir=run_dir)
-            else:
-                mip_results[args.scenario] = run_mip_scenario(
-                    scenario=args.scenario,
-                    events=data["events"],
-                    conflict_pairs=data.get("conflict_pairs"),
-                    max_events=args.mip_events,
-                    time_limit=args.mip_time,
-                    out_dir=run_dir,
-                )
-        except ImportError as e:
-            print(f"  [WARNING] Could not import mip_model: {e}")
-            print("  [WARNING] Make sure FICO Xpress is installed.")
-        except Exception as e:
-            print(f"  [ERROR] MIP model failed: {e}")
-            traceback.print_exc()
-    else:
-        print("\n>>> STEP 3: MIP OPTIMISATION — Full two-phase mode (WholeClass + SubGroup)")
-        print("    (Use --mip-wholeclass-only to revert to the faster single-phase mode)")
-        try:
-            from mip_full import run_all_mip_full_scenarios, run_mip_full_scenario
-            if args.scenario == "both":
-                mip_results = run_all_mip_full_scenarios(
-                    data, max_events=args.mip_events, time_limit=args.mip_time,
-                    out_dir=run_dir)
-            else:
-                mip_results[args.scenario] = run_mip_full_scenario(
-                    scenario=args.scenario,
-                    events=data["events"],
-                    conflict_pairs=data.get("conflict_pairs"),
-                    max_events=args.mip_events,
-                    time_limit=args.mip_time,
-                    out_dir=run_dir,
-                )
-        except ImportError as e:
-            print(f"  [WARNING] Could not import mip_full: {e}")
-            print("  [WARNING] Make sure FICO Xpress is installed.")
-        except Exception as e:
-            print(f"  [ERROR] MIP (full) model failed: {e}")
-            traceback.print_exc()
-
+    print("\n>>> STEP 3: MIP OPTIMISATION (two-phase: WholeClass + SubGroup)")
+    try:
+        from mip_model import run_all_mip_scenarios, run_mip_scenario
+        if args.scenario == "both":
+            mip_results = run_all_mip_scenarios(
+                data, max_events=args.mip_events, time_limit=args.mip_time,
+                out_dir=run_dir)
+        else:
+            mip_results[args.scenario] = run_mip_scenario(
+                scenario=args.scenario,
+                events=data["events"],
+                conflict_pairs=data.get("conflict_pairs"),
+                max_events=args.mip_events,
+                time_limit=args.mip_time,
+                out_dir=run_dir,
+            )
+    except ImportError as e:
+        print(f"  [WARNING] Could not import mip_model: {e}")
+        print("  [WARNING] Make sure FICO Xpress is installed.")
+    except Exception as e:
+        print(f"  [ERROR] MIP model failed: {e}")
+        traceback.print_exc()
     return mip_results
 
 

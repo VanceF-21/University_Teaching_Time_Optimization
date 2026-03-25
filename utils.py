@@ -147,10 +147,6 @@ def parse_args():
     parser.add_argument("--scenario",    default="both",
                         choices=["S1_9am5pm", "S2_NoFriPM", "both"],
                         help="Which scenario(s) to optimise (default: both)")
-    parser.add_argument("--mip-wholeclass-only", action="store_true",
-                        help="Revert MIP to original mode: WholeClass displaced events only "
-                             "(faster, ~1–5 min). Default is full two-phase MIP "
-                             "(WholeClass + SubGroup, ~10–30 min per scenario).")
     return parser.parse_args()
 
 
@@ -201,50 +197,36 @@ def build_model_comparison(mip_results: dict,
                 "Note":      note,
             })
 
-        # Detect whether this is a full two-phase MIP result
-        is_full_mip = "N_Displaced_Total" in ms
-
-        if is_full_mip:
-            mip_scope_label    = "WholeClass + SubGroup (two-phase)"
-            mip_events_val     = _v(ms.get("N_Displaced_Total"), "int")
-            mip_reschedule_val = _v(ms.get("N_Rescheduled_Total"), "int")
-            mip_clash_before   = _v(
-                (ms.get("N_Clash_Pairs_Before_P1") or 0) +
-                (ms.get("N_Clash_Pairs_Before_P2") or 0), "int"
-            )
-            mip_clash_after    = _v(
-                (ms.get("N_Clash_Pairs_After_P1") or 0) +
-                (ms.get("N_Clash_Pairs_After_P2") or 0), "int"
-            )
-            mip_objective      = _v(ms.get("Objective_Total"), "float")
-            mip_solve_time     = (
-                f"{ms.get('Phase1_Solve_Time_s','?')}s + "
-                f"{ms.get('Phase2_Solve_Time_s','?')}s"
-            )
-            mip_x_vars = (
-                f"{_v(ms.get('N_X_Variables_Phase1'),'int')} + "
-                f"{_v(ms.get('N_X_Variables_Phase2'),'int')}"
-            )
-            mip_z_vars = (
-                f"{_v(ms.get('N_Z_Variables_Phase1'),'int')} + "
-                f"{_v(ms.get('N_Z_Variables_Phase2'),'int')}"
-            )
-        else:
-            mip_scope_label    = "WholeClass only (legacy)"
-            mip_events_val     = _v(ms.get("N_Displaced_Events_MIP"), "int")
-            mip_reschedule_val = _v(ms.get("N_Rescheduled_Events"), "int")
-            mip_clash_before   = _v(ms.get("N_Clash_Pairs_Before"), "int")
-            mip_clash_after    = _v(ms.get("N_Clash_Pairs_After_MIP"), "int")
-            mip_objective      = _v(ms.get("Objective_Value"), "float")
-            mip_solve_time     = _v(ms.get("Solve_Time_s"), "float")
-            mip_x_vars         = _v(ms.get("N_X_Variables"), "int")
-            mip_z_vars         = _v(ms.get("N_Z_Variables"), "int")
+        # Two-phase MIP summary keys
+        mip_events_val     = _v(ms.get("N_Displaced_Total"), "int")
+        mip_reschedule_val = _v(ms.get("N_Rescheduled_Total"), "int")
+        mip_clash_before   = _v(
+            (ms.get("N_Clash_Pairs_Before_P1") or 0) +
+            (ms.get("N_Clash_Pairs_Before_P2") or 0), "int"
+        )
+        mip_clash_after    = _v(
+            (ms.get("N_Clash_Pairs_After_P1") or 0) +
+            (ms.get("N_Clash_Pairs_After_P2") or 0), "int"
+        )
+        mip_objective      = _v(ms.get("Objective_Total"), "float")
+        mip_solve_time     = (
+            f"{ms.get('Phase1_Solve_Time_s','?')}s + "
+            f"{ms.get('Phase2_Solve_Time_s','?')}s"
+        )
+        mip_x_vars = (
+            f"{_v(ms.get('N_X_Variables_Phase1'),'int')} + "
+            f"{_v(ms.get('N_X_Variables_Phase2'),'int')}"
+        )
+        mip_z_vars = (
+            f"{_v(ms.get('N_Z_Variables_Phase1'),'int')} + "
+            f"{_v(ms.get('N_Z_Variables_Phase2'),'int')}"
+        )
 
         # Scope
         add("Event_Scope",
-            mip_scope_label,
+            "WholeClass + SubGroup (two-phase)",
             "All displaced events",
-            "MIP mode: two-phase covers all; use --mip-wholeclass-only for legacy mode")
+            "MIP covers all displaced events via two phases")
         add("Events_Processed",
             mip_events_val,
             _v(hs.get("N_Displaced_Processed"), "int"),
@@ -339,8 +321,7 @@ def build_model_comparison(mip_results: dict,
                   f"{str(r['Heuristic']):>{col_w[2]}}")
     print("=" * 90)
     print("Note: Clash_Score_After uses the same weighted disp–disp metric for both models.")
-    print("      Default MIP = two-phase (WholeClass + SubGroup); "
-          "use --mip-wholeclass-only for legacy.")
+    print("      MIP = two-phase (Phase 1: WholeClass, Phase 2: SubGroup).")
 
     # Save CSV
     out_path = save_dir / "model_comparison.csv"
