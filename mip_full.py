@@ -54,10 +54,8 @@ SOLVER_TLIMIT_PHASE = 300     # seconds per phase
 MIP_GAP             = 0.02    # 2% optimality gap
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Core single-phase solver  (shared by both phases)
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Core single-phase solver  (shared by both phases)
 def _run_single_mip_phase(
     phase_name: str,
     scenario: str,
@@ -98,7 +96,7 @@ def _run_single_mip_phase(
     print(f"  [{phase_name}]  scenario={scenario}")
     print(f"{'─'*60}")
 
-    # ── Limit problem size ────────────────────────────────────────────────────
+    # Limit problem size
     if len(disp_events) > max_events:
         print(f"  Limiting to {max_events} events (by Event_Size)")
         disp_events = disp_events.nlargest(max_events, "Event_Size")
@@ -117,14 +115,14 @@ def _run_single_mip_phase(
     print(f"  Fixed events      : {len(fixed_ids):,}")
     print(f"  Extra-fixed (locked Phase 1): {len(extra_fixed_time):,}")
 
-    # ── Allowed timeslot sets ─────────────────────────────────────────────────
+    # Allowed timeslot sets
     slot_map = {}
     for _, row in disp_events.iterrows():
         eid = str(row["Event_ID"])
         slots = get_event_allowed_slots(row["Duration_min"], scenario)
         slot_map[eid] = slots
 
-    # ── Conflict pairs ────────────────────────────────────────────────────────
+    # Conflict pairs
     if conflict_pairs is not None and len(conflict_pairs) > 0:
         cp = conflict_pairs.copy()
         cp["Event_A"] = cp["Event_A"].astype(str)
@@ -149,7 +147,7 @@ def _run_single_mip_phase(
     print(f"  Disp–Fixed conflict pairs : {len(df_conflicts):,}")
     print(f"  Disp–Disp  conflict pairs : {len(dd_conflicts):,}")
 
-    # ── Fixed event time lookup ───────────────────────────────────────────────
+    # Fixed event time lookup
     # Includes both original fixed_events AND extra_fixed (Phase 1 results)
     fixed_time: dict = {}
     for _, row in fixed_events.iterrows():
@@ -160,7 +158,7 @@ def _run_single_mip_phase(
     for eid, slot_info in extra_fixed_time.items():
         fixed_time[str(eid)] = slot_info   # (day, start_hour, duration_min)
 
-    # ── Build disp→fixed conflict lookup ─────────────────────────────────────
+    # Build disp→fixed conflict lookup
     df_dict: dict = {}
     all_fixed_ids_str = set(fixed_time.keys())
     for _, row in df_conflicts.iterrows():
@@ -170,7 +168,7 @@ def _run_single_mip_phase(
         elif eb in disp_ids and ea in all_fixed_ids_str:
             df_dict.setdefault(eb, set()).add(ea)
 
-    # ── Variables — pre-filter viable slots ──────────────────────────────────
+    # Variables — pre-filter viable slots
     x = {}
     event_slot_list: dict = {}
     all_x_vars = []
@@ -215,7 +213,7 @@ def _run_single_mip_phase(
     print(f"  Skipped (all blocked)  : {n_skipped_all_blocked:,}")
     print(f"  Events entering MIP    : {len(event_slot_list):,}")
 
-    # ── Clash indicator variables z ───────────────────────────────────────────
+    # Clash indicator variables z
     z: dict = {}
     all_z_vars = []
     dd_list = []
@@ -233,7 +231,7 @@ def _run_single_mip_phase(
         dd_list.append((e1, e2, shared))
         z_idx += 1
 
-    # ── Build Xpress problem ──────────────────────────────────────────────────
+    # Build Xpress problem
     prob = xp.problem(name=f"TT_{phase_name}_{scenario}")
     prob.controls.outputlog  = 1 if verbose else 0
     prob.controls.maxtime    = -time_limit
@@ -243,7 +241,7 @@ def _run_single_mip_phase(
     prob.addVariable(all_x_vars + all_z_vars)
     print(f"  Variables: {len(all_x_vars):,} x-vars, {len(all_z_vars):,} z-vars")
 
-    # ── Constraints ───────────────────────────────────────────────────────────
+    # Constraints
     # (1) Assignment
     n_assignment = 0
     for eid, slot_vars in event_slot_list.items():
@@ -278,7 +276,7 @@ def _run_single_mip_phase(
     print(f"  Assignment constraints : {n_assignment:,}")
     print(f"  Clash-det  constraints : {n_clash_det:,}")
 
-    # ── Objective ─────────────────────────────────────────────────────────────
+    # Objective
     obj_terms = [shared * z[(e1, e2)] for (e1, e2, shared) in dd_list
                  if (e1, e2) in z]
     if obj_terms:
@@ -287,13 +285,13 @@ def _run_single_mip_phase(
         print("  [INFO] No clash variables — feasibility model only.")
         prob.setObjective(xp.Sum(0), sense=xp.minimize)
 
-    # ── Solve ─────────────────────────────────────────────────────────────────
+    # Solve
     print(f"\n  Solving (time limit: {time_limit}s, gap: {mip_gap*100:.0f}%) ...")
     t0 = time.time()
     prob.solve()
     solve_time = time.time() - t0
 
-    # ── Extract solution ──────────────────────────────────────────────────────
+    # Extract solution
     status_int = prob.getProbStatus()
     _OPT  = getattr(xp, "mip_optimal",     6)
     _FEAS = getattr(xp, "mip_solution",     5)
@@ -373,10 +371,8 @@ def _run_single_mip_phase(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Two-phase orchestrator for one scenario
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Two-phase orchestrator for one scenario
 def run_mip_full_scenario(
     scenario: str,
     events: pd.DataFrame,
@@ -435,7 +431,7 @@ def run_mip_full_scenario(
 
     fixed_base = events[~disp_mask].copy()
 
-    # ── Phase 1: WholeClass ───────────────────────────────────────────────────
+    # Phase 1: WholeClass
     wc_disp = events[disp_mask & (events["WholeClass"] == True)].copy()
 
     p1 = _run_single_mip_phase(
@@ -457,7 +453,7 @@ def run_mip_full_scenario(
             save_dir / f"mip_phase1_assignment_{scenario}.csv", index=False
         )
 
-    # ── Build extra_fixed_time from Phase 1 results ───────────────────────────
+    # Build extra_fixed_time from Phase 1 results
     # For every WholeClass displaced event:
     #   - if assigned by Phase 1 → lock at NEW slot
     #   - if NOT assigned (no viable slot) → lock at ORIGINAL slot
@@ -489,7 +485,7 @@ def run_mip_full_scenario(
     print(f"\n  Phase 1 complete — {len(p1_assigned_ids):,} WholeClass events assigned.")
     print(f"  Locking {len(extra_fixed_time):,} WholeClass events as fixed for Phase 2.")
 
-    # ── Phase 2: SubGroup ─────────────────────────────────────────────────────
+    # Phase 2: SubGroup
     sg_disp = events[disp_mask & (events["WholeClass"] == False)].copy()
 
     p2 = _run_single_mip_phase(
@@ -511,7 +507,7 @@ def run_mip_full_scenario(
             save_dir / f"mip_phase2_assignment_{scenario}.csv", index=False
         )
 
-    # ── Merge results ─────────────────────────────────────────────────────────
+    # Merge results
     combined_df = pd.concat(
         [p1["assignment_df"], p2["assignment_df"]],
         ignore_index=True,
@@ -580,10 +576,8 @@ def run_mip_full_scenario(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Run both scenarios
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Run both scenarios
 def run_all_mip_full_scenarios(
     data: dict,
     max_events: int  = MAX_EVENTS_PHASE,
@@ -637,10 +631,8 @@ def run_all_mip_full_scenarios(
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Standalone entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Standalone entry point
 if __name__ == "__main__":
     import argparse
     from data_preprocessing import run_preprocessing
