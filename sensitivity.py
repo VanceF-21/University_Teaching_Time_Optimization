@@ -1,58 +1,45 @@
 """
-param_sensitivity.py
+sensitivity.py
 
-Parameter sensitivity analysis and runtime comparison for the
-University Teaching Time Optimization pipeline.
+Parameter Sensitivity Analysis for the Two-Phase MIP Model.
 
-Two main analyses:
-─────────────────────────────────────────────────────────────────────
-A) MIP PARAMETER SWEEPS
-   For mip_model.py (two-phase: WholeClass + SubGroup),
-   independently vary three parameters and record quality + runtime:
+Strategy: One-At-a-Time (OAT) sweep — vary one parameter at a time while
+holding the other two at their defaults, for both scheduling scenarios.
 
-     • max_events  : problem size limit  [50, 100, 200, 300, 400, 500, 700, 1000]
-     • time_limit  : solver wall-clock s  [30, 60, 120, 180, 300, 480, 600]
-     • mip_gap     : relative opt. gap   [0.005, 0.01, 0.02, 0.05, 0.10]
+Parameters analysed
+────────────────────
+  max_events  : per-phase cap on displaced events (Top-N by Event_Size)
+                Default 500.  Sweep: [100, 200, 300, 400, 500, 700]
+  time_limit  : Xpress wall-clock limit per phase (seconds)
+                Default 300.  Sweep: [30, 60, 120, 180, 300]
+  mip_gap     : MIP relative optimality gap tolerance
+                Default 0.02. Sweep: [0.005, 0.01, 0.02, 0.05, 0.10]
 
-   Metrics recorded per run:
-     solve_time_s, objective_value (weighted clash score),
-     n_clashes, n_rescheduled, solve_status
+Metrics collected per run
+──────────────────────────
+  Objective       : total weighted clash score (P1 + P2)
+  Solve_Time_s    : wall-clock solve time (P1 + P2)
+  N_Clashes       : clash pairs remaining after optimisation
+  N_Rescheduled   : events successfully assigned
+  Solve_Status    : OPTIMAL / FEASIBLE / INFEASIBLE
 
-B) RUNTIME COMPARISON (3 methods, both scenarios)
-     1. MIP Model        – mip_model.py  (two-phase: WholeClass + SubGroup)
-     2. Heuristic greedy – greedy only, no local search
-     3. Heuristic full   – greedy + local search (200 iterations)
-
-   A grouped bar chart is produced comparing total wall-clock time.
-
-─────────────────────────────────────────────────────────────────────
-
-Visualisations produced (all saved to <out_dir>/sensitivity/figures/):
-  1. max_events_vs_quality.png    – clash score & solve time vs max_events
-  2. time_limit_vs_quality.png    – clash score & gap vs time_limit
-  3. mip_gap_vs_quality.png       – clash score & solve time vs mip_gap
-  4. quality_vs_time_scatter.png  – Pareto scatter (quality vs runtime)
-  5. runtime_comparison.png       – grouped bar chart (3 methods × 2 scenarios)
-  6. sensitivity_heatmap.png      – heatmap: max_events × time_limit → objective
-
-CSVs also saved to <out_dir>/sensitivity/:
+Outputs  (saved to out_dir/sensitivity/)
+─────────────────────────────────────────
   sensitivity_max_events.csv
   sensitivity_time_limit.csv
   sensitivity_mip_gap.csv
-  runtime_comparison.csv
-
-Usage:
-  python param_sensitivity.py                      # full sweep (slow)
-  python param_sensitivity.py --quick              # reduced grid (fast demo)
-  python param_sensitivity.py --scenario S1_9am5pm # one scenario only
-  python param_sensitivity.py --skip-sweep         # runtime comparison only
-  python param_sensitivity.py --skip-runtime       # parameter sweeps only
+  sensitivity_runtime_comparison.csv
+  figures/sens_max_events.png
+  figures/sens_time_limit.png
+  figures/sens_mip_gap.png
+  figures/sens_pareto.png
+  figures/sens_runtime_comparison.png
+  figures/sens_heatmap.png
 """
 
-import argparse
 import time
 import warnings
-import datetime
+import traceback
 from pathlib import Path
 
 import pandas as pd
@@ -61,748 +48,1186 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-import seaborn as sns
 
 warnings.filterwarnings("ignore")
 
-BASE_DIR = Path(__file__).resolve().parent
-OUT_DIR  = BASE_DIR / "outputs"
+# Default parameter values
+DEFAULT_MAX_EVENTS = 500
+DEFAULT_TIME_LIMIT = 300
+DEFAULT_MIP_GAP    = 0.02
 
+# Sweep ranges
+SWEEP_MAX_EVENTS  = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+SWEEP_TIME_LIMITS = [30, 60, 120, 180, 300, 400, 500]
+SWEEP_MIP_GAPS    = [0.005, 0.01, 0.02, 0.05, 0.10]
 
+SCENARIOS = ["S1_9am5pm", "S2_NoFriPM"]
 
-# Colour / style constants (aligned with visualization.py)
-sns.set_theme(style="whitegrid", font_scale=1.1)
-
-SCENARIO_COLORS = {
-    "S1_9am5pm":  "#DD8452",
-    "S2_NoFriPM": "#55A868",
+SCENARIO_LABELS = {
+    "S1_9am5pm":  "S1 (9am–5pm)",
+    "S2_NoFriPM": "S2 (No Fri PM)",
 }
-METHOD_COLORS = {
-    "MIP Model":        "#4C72B0",
-    "Heuristic Greedy": "#8172B2",
-    "Heuristic Full":   "#64B5CD",
+
+COLORS = {
+    "S1_9am5pm":  "#2196F3",   # blue
+    "S2_NoFriPM": "#FF5722",   # orange
 }
-METHOD_ORDER = ["MIP Model", "Heuristic Greedy", "Heuristic Full"]
-
-# Default sweep grids
-GRID_MAX_EVENTS  = [100, 200, 300, 400, 500, 700, 1000]
-GRID_TIME_LIMIT  = [30, 60, 120, 180, 300, 480, 600]
-GRID_MIP_GAP     = [0.005, 0.01, 0.02, 0.05, 0.10]
-
-# Quick-mode grids (fewer points)
-GRID_MAX_EVENTS_QUICK = [50, 150, 300, 500, 700]
-GRID_TIME_LIMIT_QUICK = [30, 120, 300, 600]
-GRID_MIP_GAP_QUICK    = [0.01, 0.05, 0.10]
 
 
+def _run_mip_once(
+    scenario: str,
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    max_events: int,
+    time_limit: int,
+    mip_gap: float,
+    tmp_dir: Path,
+) -> dict:
+    """
+    Run one two-phase MIP solve and return a flat metrics dict.
 
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="MIP parameter sensitivity analysis + runtime comparison",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    p.add_argument("--quick",        action="store_true",
-                   help="Use reduced grid (fewer sweep points, faster)")
-    p.add_argument("--scenario",     default="both",
-                   choices=["S1_9am5pm", "S2_NoFriPM", "both"],
-                   help="Which scenario(s) to analyse (default: both)")
-    p.add_argument("--skip-sweep",   action="store_true",
-                   help="Skip parameter sweep; only run runtime comparison")
-    p.add_argument("--skip-runtime", action="store_true",
-                   help="Skip runtime comparison; only run parameter sweeps")
-    p.add_argument("--skip-conflicts", action="store_true",
-                   help="Reuse existing conflict_pairs.csv (faster startup)")
-    p.add_argument("--heur-iter",    type=int, default=200,
-                   help="Local search iterations for heuristic full mode (default: 200)")
-    return p.parse_args()
-
-
-
-def make_sens_dirs() -> tuple:
-    """Create output dirs for sensitivity analysis and return (sens_dir, fig_dir)."""
-    ts       = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    sens_dir = OUT_DIR / f"sensitivity_{ts}"
-    fig_dir  = sens_dir / "figures"
-    sens_dir.mkdir(parents=True, exist_ok=True)
-    fig_dir.mkdir(parents=True, exist_ok=True)
-    return sens_dir, fig_dir
-
-
-def save_fig(fig: plt.Figure, name: str, fig_dir: Path, dpi: int = 150):
-    path = fig_dir / name
-    fig.savefig(path, bbox_inches="tight", dpi=dpi)
-    plt.close(fig)
-    print(f"  [sens] Saved figure → {path.relative_to(BASE_DIR)}")
-
-
-
-def _run_mip_once(scenario: str,
-                  events: pd.DataFrame,
-                  conflict_pairs,
-                  max_events: int,
-                  time_limit: int,
-                  mip_gap: float,
-                  tmp_dir: Path) -> dict:
-    """Run a single MIP solve (two-phase) and return a flat metrics dict."""
-    t0 = time.time()
+    Returns dict with keys:
+        Scenario, max_events, time_limit, mip_gap,
+        Objective, Solve_Time_s, N_Clashes, N_Rescheduled, Solve_Status
+    Returns a dict with Solve_Status='ERROR' on any exception.
+    """
+    base = {
+        "Scenario":      scenario,
+        "max_events":    max_events,
+        "time_limit":    time_limit,
+        "mip_gap":       mip_gap,
+        "Objective":     np.nan,
+        "Solve_Time_s":  np.nan,
+        "N_Clashes":     np.nan,
+        "N_Rescheduled": 0,
+        "Solve_Status":  "ERROR",
+    }
     try:
         from mip_model import run_mip_scenario
-        res       = run_mip_scenario(
-            scenario=scenario,
-            events=events,
-            conflict_pairs=conflict_pairs,
-            max_events=max_events,
-            time_limit=time_limit,
-            mip_gap=mip_gap,
-            verbose=False,
-            out_dir=tmp_dir,
+        t0  = time.time()
+        res = run_mip_scenario(
+            scenario       = scenario,
+            events         = events,
+            conflict_pairs = conflict_pairs,
+            max_events     = max_events,
+            time_limit     = time_limit,
+            mip_gap        = mip_gap,
+            verbose        = False,
+            out_dir        = tmp_dir,
         )
-        wall_time = time.time() - t0
-        summary   = res.get("summary", {})
-        obj     = summary.get("Objective_Total",    res.get("objective"))
-        ncl     = (summary.get("N_Clash_Pairs_After_P1", 0) or 0) + \
-                  (summary.get("N_Clash_Pairs_After_P2", 0) or 0)
-        nres    = summary.get("N_Rescheduled_Total", res.get("n_displaced", 0))
-        ndisp   = summary.get("N_Displaced_Total",   res.get("n_displaced", 0))
-        solve_t = (summary.get("Phase1_Solve_Time_s", 0) or 0) + \
-                  (summary.get("Phase2_Solve_Time_s", 0) or 0)
-        return {
-            "Model":         "MIP Model",
-            "Scenario":      scenario,
-            "Max_Events":    max_events,
-            "Time_Limit_s":  time_limit,
-            "MIP_Gap":       mip_gap,
+        elapsed = time.time() - t0
+
+        base.update({
+            "Objective":     res.get("objective") or np.nan,
+            "Solve_Time_s":  round(elapsed, 1),
+            "N_Clashes":     res.get("n_clashes", np.nan),
+            "N_Rescheduled": len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
             "Solve_Status":  res.get("status", "UNKNOWN"),
-            "Solve_Time_s":  round(float(solve_t or wall_time), 2),
-            "Wall_Time_s":   round(wall_time, 2),
-            "Objective":     round(float(obj), 1) if obj is not None else np.nan,
-            "N_Clashes":     int(ncl or 0),
-            "N_Rescheduled": int(nres or 0),
-            "N_Displaced":   int(ndisp or 0),
-        }
-    except Exception as exc:
-        wall_time = time.time() - t0
-        print(f"    [WARN] MIP/{scenario} max={max_events} "
-              f"tlim={time_limit} gap={mip_gap} → {exc}")
-        return {
-            "Model":         "MIP Model",
-            "Scenario":      scenario,
-            "Max_Events":    max_events,
-            "Time_Limit_s":  time_limit,
-            "MIP_Gap":       mip_gap,
-            "Solve_Status":  "ERROR",
-            "Solve_Time_s":  round(wall_time, 2),
-            "Wall_Time_s":   round(wall_time, 2),
-            "Objective":     np.nan,
-            "N_Clashes":     np.nan,
-            "N_Rescheduled": np.nan,
-            "N_Displaced":   np.nan,
-        }
+        })
+    except ImportError:
+        print("  [sensitivity] xpress / mip_model not available — skipping MIP run.")
+        base["Solve_Status"] = "SKIPPED"
+    except Exception as e:
+        print(f"  [sensitivity] MIP run failed ({scenario}, max_events={max_events}, "
+              f"time_limit={time_limit}, mip_gap={mip_gap}): {e}")
+        traceback.print_exc()
+    return base
 
 
-
-def _run_heuristic_once(scenario: str,
-                         data: dict,
-                         run_ls: bool,
-                         ls_iter: int,
-                         tmp_dir: Path) -> dict:
-    """Run one heuristic scenario and return a flat metrics dict."""
-    t0 = time.time()
+def _run_heuristic_once(
+    scenario: str,
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
+    tmp_dir: Path,
+) -> dict:
+    """
+    Run one greedy + local-search heuristic solve.
+    使用 DEFAULT_MAX_EVENTS 与 MIP 保持相同问题规模，确保 runtime 对比公平。
+    Returns flat metrics dict for runtime comparison.
+    """
+    base = {
+        "Scenario":      scenario,
+        "Method":        "Heuristic (Greedy+LS)",
+        "Objective":     np.nan,
+        "Solve_Time_s":  np.nan,
+        "N_Clashes":     np.nan,
+        "N_Rescheduled": 0,
+        "Solve_Status":  "ERROR",
+    }
     try:
         from heuristic_model import run_heuristic_scenario
+        t0  = time.time()
         res = run_heuristic_scenario(
-            scenario=scenario,
-            events=data["events"],
-            conflict_pairs=data.get("conflict_pairs"),
-            student_events=data["student_events"],
-            max_events=5000,
-            run_local_search=run_ls,
-            ls_max_iter=ls_iter,
-            out_dir=tmp_dir,
+            scenario         = scenario,
+            events           = events,
+            conflict_pairs   = conflict_pairs,
+            student_events   = student_events,
+            max_events       = DEFAULT_MAX_EVENTS,   # 与 MIP 使用相同规模，确保公平对比
+            run_local_search = True,
+            ls_max_iter      = 300,
+            out_dir          = tmp_dir,
         )
-        wall_time = time.time() - t0
-        sm = res.get("summary", {})
-        return {
-            "Model":         "Heuristic Full" if run_ls else "Heuristic Greedy",
-            "Scenario":      scenario,
-            "Wall_Time_s":   round(wall_time, 2),
-            "Objective":     sm.get("LocalSearch_Clash_Score",
-                                    sm.get("Greedy_Clash_Score", np.nan)),
-            "N_Rescheduled": sm.get("N_Rescheduled", np.nan),
-        }
-    except Exception as exc:
-        print(f"    [WARN] heuristic/{scenario} ls={run_ls} → {exc}")
-        return {
-            "Model":         "Heuristic Full" if run_ls else "Heuristic Greedy",
-            "Scenario":      scenario,
-            "Wall_Time_s":   round(time.time() - t0, 2),
-            "Objective":     np.nan,
-            "N_Rescheduled": np.nan,
-        }
+        elapsed = time.time() - t0
+
+        summary = res.get("summary", {})
+        base.update({
+            "Objective":     summary.get("LocalSearch_Clash_Score", summary.get("Greedy_Clash_Score", np.nan)),
+            "Solve_Time_s":  round(elapsed, 1),
+            "N_Clashes":     summary.get("LocalSearch_Clash_Score", np.nan),
+            "N_Rescheduled": len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
+            "Solve_Status":  "FEASIBLE",
+        })
+    except Exception as e:
+        print(f"  [sensitivity] Heuristic run failed ({scenario}): {e}")
+        traceback.print_exc()
+    return base
 
 
 
-def run_parameter_sweeps(data: dict,
-                          scenarios: list,
-                          quick: bool,
-                          sens_dir: Path,
-                          fig_dir: Path) -> dict:
-    """
-    Run three independent parameter sweeps (max_events, time_limit, mip_gap).
+# OAT Sweep functions
+def _sweep_max_events(
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    out_dir: Path,
+) -> pd.DataFrame:
+    """Sweep max_events; hold time_limit and mip_gap at defaults."""
+    tmp_dir = out_dir / "_tmp_sens"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    Each sweep varies ONE parameter while holding the others at their defaults:
-      default max_events  = 300
-      default time_limit  = 180 s
-      default mip_gap     = 0.02
-
-    Returns a dict of DataFrames: { "max_events": df, "time_limit": df, "mip_gap": df }
-    """
-    DEFAULT_MAX_EVENTS = 500
-    DEFAULT_TIME_LIMIT = 300
-    DEFAULT_MIP_GAP    = 0.02
-
-    grid_me  = GRID_MAX_EVENTS_QUICK  if quick else GRID_MAX_EVENTS
-    grid_tl  = GRID_TIME_LIMIT_QUICK  if quick else GRID_TIME_LIMIT
-    grid_gap = GRID_MIP_GAP_QUICK     if quick else GRID_MIP_GAP
-
-    events         = data["events"]
-    conflict_pairs = data.get("conflict_pairs")
-    tmp_dir        = sens_dir / "_tmp_mip"
-    tmp_dir.mkdir(exist_ok=True)
-
-    sweep_results = {"max_events": [], "time_limit": [], "mip_gap": []}
-
-    total_runs = (len(grid_me) + len(grid_tl) + len(grid_gap)) * len(scenarios)
-    run_no = 0
-    print(f"\n  Total MIP sweep runs planned: {total_runs}")
-
-    for sc in scenarios:
-
-        # Sweep 1: max_events
-        print(f"\n  [{sc}] Sweeping max_events …")
-        for me in grid_me:
-            run_no += 1
-            print(f"    Run {run_no}/{total_runs}  max_events={me} …", end=" ", flush=True)
-            row = _run_mip_once(sc, events, conflict_pairs,
-                                me, DEFAULT_TIME_LIMIT, DEFAULT_MIP_GAP, tmp_dir)
-            row["Sweep"] = "max_events"
-            sweep_results["max_events"].append(row)
-            print(f"status={row['Solve_Status']}  obj={row['Objective']}  "
-                  f"t={row['Solve_Time_s']}s")
-
-        # Sweep 2: time_limit
-        print(f"\n  [{sc}] Sweeping time_limit …")
-        for tl in grid_tl:
-            run_no += 1
-            print(f"    Run {run_no}/{total_runs}  time_limit={tl}s …", end=" ", flush=True)
-            row = _run_mip_once(sc, events, conflict_pairs,
-                                DEFAULT_MAX_EVENTS, tl, DEFAULT_MIP_GAP, tmp_dir)
-            row["Sweep"] = "time_limit"
-            sweep_results["time_limit"].append(row)
-            print(f"status={row['Solve_Status']}  obj={row['Objective']}  "
-                  f"t={row['Solve_Time_s']}s")
-
-        # Sweep 3: mip_gap
-        print(f"\n  [{sc}] Sweeping mip_gap …")
-        for gap in grid_gap:
-            run_no += 1
-            print(f"    Run {run_no}/{total_runs}  mip_gap={gap} …", end=" ", flush=True)
-            row = _run_mip_once(sc, events, conflict_pairs,
-                                DEFAULT_MAX_EVENTS, DEFAULT_TIME_LIMIT, gap, tmp_dir)
-            row["Sweep"] = "mip_gap"
-            sweep_results["mip_gap"].append(row)
-            print(f"status={row['Solve_Status']}  obj={row['Objective']}  "
-                  f"t={row['Solve_Time_s']}s")
-
-    # Consolidate into DataFrames and save
-    dfs = {}
-    for sweep_key, rows in sweep_results.items():
-        df = pd.DataFrame(rows)
-        dfs[sweep_key] = df
-        csv_path = sens_dir / f"sensitivity_{sweep_key}.csv"
-        df.to_csv(csv_path, index=False)
-        print(f"  [sens] CSV saved → {csv_path.relative_to(BASE_DIR)}")
-
-    # Produce charts
-    _plot_max_events_sweep(dfs["max_events"],   fig_dir)
-    _plot_time_limit_sweep(dfs["time_limit"],   fig_dir)
-    _plot_mip_gap_sweep(dfs["mip_gap"],         fig_dir)
-    _plot_quality_vs_time(dfs["max_events"],    fig_dir)
-    _plot_sensitivity_heatmap(dfs["max_events"], dfs["time_limit"], fig_dir)
-
-    return dfs
-
-
-
-# Runtime comparison
-def run_runtime_comparison(data: dict,
-                            scenarios: list,
-                            ls_iter: int,
-                            sens_dir: Path,
-                            fig_dir: Path) -> pd.DataFrame:
-    """
-    Run all three methods once at default settings and compare wall-clock time.
-
-    Methods:
-      MIP Model        max_events=500, time_limit=300, gap=0.02
-      Heuristic Greedy greedy only
-      Heuristic Full   greedy + local search (ls_iter iterations)
-    """
-    events         = data["events"]
-    conflict_pairs = data.get("conflict_pairs")
-    tmp_dir        = sens_dir / "_tmp_rt"
-    tmp_dir.mkdir(exist_ok=True)
-
+    print("\n[Sensitivity] Sweeping max_events …")
     rows = []
-    methods = [
-        ("mip",       False),
-        ("greedy",    False),
-        ("heuristic", True),
-    ]
-
-    for sc in scenarios:
-        for mtype, is_heuristic in methods:
-            if is_heuristic or mtype == "greedy":
-                # Heuristic
-                run_ls = (mtype == "heuristic")
-                print(f"  [runtime] Heuristic ({'full' if run_ls else 'greedy'}) / {sc} …",
-                      end=" ", flush=True)
-                row = _run_heuristic_once(sc, data, run_ls, ls_iter, tmp_dir)
-            else:
-                # MIP Model
-                print(f"  [runtime] MIP Model / {sc} …", end=" ", flush=True)
-                row = _run_mip_once(sc, events, conflict_pairs,
-                                    500, 300, 0.02, tmp_dir)
+    for sc in SCENARIOS:
+        for me in SWEEP_MAX_EVENTS:
+            print(f"  scenario={sc}  max_events={me}")
+            row = _run_mip_once(
+                scenario       = sc,
+                events         = events,
+                conflict_pairs = conflict_pairs,
+                max_events     = me,
+                time_limit     = DEFAULT_TIME_LIMIT,
+                mip_gap        = DEFAULT_MIP_GAP,
+                tmp_dir        = tmp_dir,
+            )
             rows.append(row)
-            print(f"t={row['Wall_Time_s']}s  obj={row.get('Objective', 'N/A')}")
 
     df = pd.DataFrame(rows)
-    csv_path = sens_dir / "runtime_comparison.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"  [sens] CSV saved → {csv_path.relative_to(BASE_DIR)}")
+    df.to_csv(out_dir / "sensitivity_max_events.csv", index=False)
+    print(f"  Saved → {out_dir / 'sensitivity_max_events.csv'}")
+    return df
 
-    _plot_runtime_comparison(df, fig_dir)
+
+def _sweep_time_limit(
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    out_dir: Path,
+) -> pd.DataFrame:
+    """Sweep time_limit; hold max_events and mip_gap at defaults."""
+    tmp_dir = out_dir / "_tmp_sens"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n[Sensitivity] Sweeping time_limit …")
+    rows = []
+    for sc in SCENARIOS:
+        for tl in SWEEP_TIME_LIMITS:
+            print(f"  scenario={sc}  time_limit={tl}s")
+            row = _run_mip_once(
+                scenario       = sc,
+                events         = events,
+                conflict_pairs = conflict_pairs,
+                max_events     = DEFAULT_MAX_EVENTS,
+                time_limit     = tl,
+                mip_gap        = DEFAULT_MIP_GAP,
+                tmp_dir        = tmp_dir,
+            )
+            rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_dir / "sensitivity_time_limit.csv", index=False)
+    print(f"  Saved → {out_dir / 'sensitivity_time_limit.csv'}")
+    return df
+
+
+def _sweep_mip_gap(
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    out_dir: Path,
+) -> pd.DataFrame:
+    """Sweep mip_gap; hold max_events and time_limit at defaults."""
+    tmp_dir = out_dir / "_tmp_sens"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n[Sensitivity] Sweeping mip_gap …")
+    rows = []
+    for sc in SCENARIOS:
+        for gap in SWEEP_MIP_GAPS:
+            print(f"  scenario={sc}  mip_gap={gap:.3f}")
+            row = _run_mip_once(
+                scenario       = sc,
+                events         = events,
+                conflict_pairs = conflict_pairs,
+                max_events     = DEFAULT_MAX_EVENTS,
+                time_limit     = DEFAULT_TIME_LIMIT,
+                mip_gap        = gap,
+                tmp_dir        = tmp_dir,
+            )
+            rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_dir / "sensitivity_mip_gap.csv", index=False)
+    print(f"  Saved → {out_dir / 'sensitivity_mip_gap.csv'}")
+    return df
+
+
+def run_parameter_sweeps(data: dict, out_dir: Path) -> dict:
+    """
+    Run all three OAT parameter sweeps.
+
+    Returns
+    -------
+    dict with keys 'max_events', 'time_limit', 'mip_gap',
+    each containing the corresponding sweep DataFrame.
+    """
+    events         = data["events"]
+    conflict_pairs = data.get("conflict_pairs")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    df_me  = _sweep_max_events(events, conflict_pairs, out_dir)
+    df_tl  = _sweep_time_limit(events, conflict_pairs, out_dir)
+    df_gap = _sweep_mip_gap(events, conflict_pairs, out_dir)
+
+    return {
+        "max_events": df_me,
+        "time_limit": df_tl,
+        "mip_gap":    df_gap,
+    }
+
+
+
+# Runtime comparison: MIP vs Heuristic
+def run_runtime_comparison(data: dict, out_dir: Path) -> pd.DataFrame:
+    """
+    Compare MIP (default params) vs Heuristic (Greedy+LS) on runtime and
+    solution quality.
+
+    Returns a DataFrame with one row per (scenario × method).
+    """
+    events         = data["events"]
+    conflict_pairs = data.get("conflict_pairs")
+    student_events = data["student_events"]
+    tmp_dir        = out_dir / "_tmp_sens"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n[Sensitivity] Runtime comparison: MIP vs Heuristic …")
+    rows = []
+    for sc in SCENARIOS:
+        # MIP with default parameters
+        print(f"  MIP  scenario={sc}")
+        mip_row = _run_mip_once(
+            scenario       = sc,
+            events         = events,
+            conflict_pairs = conflict_pairs,
+            max_events     = DEFAULT_MAX_EVENTS,
+            time_limit     = DEFAULT_TIME_LIMIT,
+            mip_gap        = DEFAULT_MIP_GAP,
+            tmp_dir        = tmp_dir,
+        )
+        mip_row["Method"] = f"MIP (Xpress, {DEFAULT_MAX_EVENTS} events)"
+        rows.append(mip_row)
+
+        # Heuristic
+        print(f"  Heur scenario={sc}")
+        heur_row = _run_heuristic_once(
+            scenario       = sc,
+            events         = events,
+            conflict_pairs = conflict_pairs,
+            student_events = student_events,
+            tmp_dir        = tmp_dir,
+        )
+        heur_row["max_events"]  = DEFAULT_MAX_EVENTS
+        heur_row["time_limit"]  = DEFAULT_TIME_LIMIT
+        heur_row["mip_gap"]     = DEFAULT_MIP_GAP
+        rows.append(heur_row)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_dir / "sensitivity_runtime_comparison.csv", index=False)
+    print(f"  Saved → {out_dir / 'sensitivity_runtime_comparison.csv'}")
     return df
 
 
 
-# Plotting functions
-def _add_status_markers(ax, df: pd.DataFrame, x_col: str, y_col: str):
-    """Overlay ✗ markers on points where Solve_Status is not OPTIMAL/FEASIBLE."""
-    if "Solve_Status" not in df.columns:
-        return
-    bad = df[~df["Solve_Status"].isin(["OPTIMAL", "FEASIBLE", "FEASIBLE_TIME_LIMIT",
-                                        "LP_OPTIMAL_NO_INT"])]
-    if len(bad):
-        ax.scatter(bad[x_col], bad[y_col], marker="X", s=120,
-                   color="red", zorder=5, label="Not solved")
+# Plotting helpers
+def _savefig(fig: plt.Figure, path: Path) -> None:
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved → {path}")
 
 
-def _twin_axes_plot(ax_left, x_vals, y_left, y_right,
-                    label_left, label_right,
-                    color_left="#4C72B0", color_right="#C44E52",
-                    marker="o"):
-    """Plot two y-axes sharing the same x-axis."""
-    ax_right = ax_left.twinx()
-    ax_left.plot(x_vals,  y_left,  color=color_left,  marker=marker,
-                 linewidth=2, markersize=7, label=label_left)
-    ax_right.plot(x_vals, y_right, color=color_right, marker="s",
-                  linewidth=2, markersize=7, linestyle="--", label=label_right)
-    ax_left.set_ylabel(label_left,  color=color_left,  fontsize=11)
-    ax_right.set_ylabel(label_right, color=color_right, fontsize=11)
-    ax_left.tick_params(axis="y",  labelcolor=color_left)
-    ax_right.tick_params(axis="y", labelcolor=color_right)
-    # Combined legend
-    lines_l, labs_l = ax_left.get_legend_handles_labels()
-    lines_r, labs_r = ax_right.get_legend_handles_labels()
-    ax_left.legend(lines_l + lines_r, labs_l + labs_r,
-                   loc="upper right", fontsize=9)
-    return ax_right
-
-
-# 1. max_events sweep
-def _plot_max_events_sweep(df: pd.DataFrame, fig_dir: Path):
-    """Two-panel: (a) clash score vs max_events, (b) solve time vs max_events."""
+def _plot_max_events_sweep(df: pd.DataFrame, fig_dir: Path) -> None:
+    """Two-panel: Objective vs max_events  |  Solve_Time vs max_events."""
     if df.empty:
         return
 
-    scenarios = sorted(df["Scenario"].unique())
-    models    = sorted(df["Model"].unique())
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle("Parameter Sensitivity: Problem Size (max_events)", fontsize=14, y=1.01)
-
-    linestyles = {"MIP Model": "-"}
-    markers    = {"S1_9am5pm": "o", "S2_NoFriPM": "s"}
-
-    for ax, (y_col, ylabel, title) in zip(
-        axes,
-        [("Objective",   "Weighted Clash Score",  "(a) Solution Quality vs Problem Size"),
-         ("Solve_Time_s","Solve Time (s)",         "(b) Runtime vs Problem Size")]
-    ):
-        for model in models:
-            for sc in scenarios:
-                sub = df[(df["Model"] == sc) | (df["Scenario"] == sc)]
-                sub = df[(df["Model"] == model) & (df["Scenario"] == sc)].copy()
-                sub = sub.sort_values("Max_Events")
-                valid = sub.dropna(subset=[y_col])
-                if valid.empty:
-                    continue
-                color = SCENARIO_COLORS.get(sc, "#888888")
-                ls    = linestyles.get(model, "-")
-                mk    = markers.get(sc, "o")
-                ax.plot(valid["Max_Events"], valid[y_col],
-                        color=color, linestyle=ls, marker=mk,
-                        linewidth=2, markersize=7,
-                        label=f"{model} / {sc}")
-
-        ax.set_xlabel("max_events (problem size limit)", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12)
-        ax.legend(fontsize=8, loc="upper left")
-        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-
-    fig.tight_layout()
-    save_fig(fig, "max_events_vs_quality.png", fig_dir)
-
-
-# 2. time_limit sweep
-def _plot_time_limit_sweep(df: pd.DataFrame, fig_dir: Path):
-    """Two-panel: clash score vs time_limit, and solve_time vs time_limit."""
-    if df.empty:
-        return
-
-    scenarios = sorted(df["Scenario"].unique())
-    models    = sorted(df["Model"].unique())
-    linestyles = {"MIP Model": "-"}
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle("Parameter Sensitivity: Solver Time Limit (time_limit)", fontsize=14, y=1.01)
-
-    for ax, (y_col, ylabel, title) in zip(
-        axes,
-        [("Objective",    "Weighted Clash Score", "(a) Solution Quality vs Time Limit"),
-         ("Solve_Time_s", "Actual Solve Time (s)", "(b) Actual Runtime vs Time Limit")]
-    ):
-        for model in models:
-            for sc in scenarios:
-                sub = df[(df["Model"] == model) & (df["Scenario"] == sc)].copy()
-                sub = sub.sort_values("Time_Limit_s")
-                valid = sub.dropna(subset=[y_col])
-                if valid.empty:
-                    continue
-                color = SCENARIO_COLORS.get(sc, "#888888")
-                ls    = linestyles.get(model, "-")
-                ax.plot(valid["Time_Limit_s"], valid[y_col],
-                        color=color, linestyle=ls, marker="o",
-                        linewidth=2, markersize=7,
-                        label=f"{model} / {sc}")
-
-        # Diagonal reference line for panel (b): actual_time = time_limit
-        if y_col == "Solve_Time_s" and not df["Time_Limit_s"].dropna().empty:
-            xlim_max = df["Time_Limit_s"].max() * 1.05
-            ax.plot([0, xlim_max], [0, xlim_max], "k:", linewidth=1,
-                    alpha=0.5, label="actual = limit (bound)")
-
-        ax.set_xlabel("time_limit (s)", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12)
-        ax.legend(fontsize=8, loc="upper right")
-
-    fig.tight_layout()
-    save_fig(fig, "time_limit_vs_quality.png", fig_dir)
-
-
-# 3. mip_gap sweep
-def _plot_mip_gap_sweep(df: pd.DataFrame, fig_dir: Path):
-    """Two-panel: clash score vs mip_gap, and solve_time vs mip_gap."""
-    if df.empty:
-        return
-
-    scenarios = sorted(df["Scenario"].unique())
-    models    = sorted(df["Model"].unique())
-    linestyles = {"MIP Model": "-"}
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
-    fig.suptitle("Parameter Sensitivity: Optimality Gap (mip_gap)", fontsize=14, y=1.01)
-
-    for ax, (y_col, ylabel, title) in zip(
-        axes,
-        [("Objective",    "Weighted Clash Score", "(a) Solution Quality vs MIP Gap"),
-         ("Solve_Time_s", "Solve Time (s)",        "(b) Runtime vs MIP Gap")]
-    ):
-        for model in models:
-            for sc in scenarios:
-                sub = df[(df["Model"] == model) & (df["Scenario"] == sc)].copy()
-                sub = sub.sort_values("MIP_Gap")
-                valid = sub.dropna(subset=[y_col])
-                if valid.empty:
-                    continue
-                color = SCENARIO_COLORS.get(sc, "#888888")
-                ls    = linestyles.get(model, "-")
-                ax.plot(valid["MIP_Gap"] * 100, valid[y_col],
-                        color=color, linestyle=ls, marker="o",
-                        linewidth=2, markersize=7,
-                        label=f"{model} / {sc}")
-
-        ax.set_xlabel("MIP Gap (%)", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_title(title, fontsize=12)
-        ax.legend(fontsize=8)
-
-    fig.tight_layout()
-    save_fig(fig, "mip_gap_vs_quality.png", fig_dir)
-
-
-# 4. Quality vs Runtime scatter (Pareto)
-def _plot_quality_vs_time(df: pd.DataFrame, fig_dir: Path):
-    """
-    Scatter plot: x = solve time, y = clash score.
-    Each point = one solver run; coloured by scenario, shaped by model.
-    Shows the quality–time trade-off (Pareto frontier).
-    """
-    if df.empty:
-        return
-
-    valid = df.dropna(subset=["Objective", "Solve_Time_s"])
-    if valid.empty:
-        return
-
-    fig, ax = plt.subplots(figsize=(9, 6))
-    markers_by_model = {"MIP Model": "o"}
-
-    for _, row in valid.iterrows():
-        color = SCENARIO_COLORS.get(row["Scenario"], "#888888")
-        mk    = markers_by_model.get(row["Model"], "D")
-        ax.scatter(row["Solve_Time_s"], row["Objective"],
-                   color=color, marker=mk, s=80, alpha=0.85, edgecolors="white")
-
-    # Proxy artists for legend
-    from matplotlib.lines import Line2D
-    legend_elems = [
-        Line2D([0], [0], marker="o", color=c, markersize=9, linestyle="none",
-               label=sc)
-        for sc, c in SCENARIO_COLORS.items()
-        if sc in valid["Scenario"].values
-    ] + [
-        Line2D([0], [0], marker=mk, color="#555", markersize=9, linestyle="none",
-               label=m)
-        for m, mk in markers_by_model.items()
-        if m in valid["Model"].values
-    ]
-    ax.legend(handles=legend_elems, fontsize=9, loc="upper right")
-
-    ax.set_xlabel("Solve Time (s)", fontsize=12)
-    ax.set_ylabel("Weighted Clash Score (lower is better)", fontsize=12)
-    ax.set_title("Quality vs Runtime Trade-off (MIP Sweep)",
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Sensitivity: max_events (time_limit=300 s, gap=2%)",
                  fontsize=13, fontweight="bold")
-    fig.tight_layout()
-    save_fig(fig, "quality_vs_time_scatter.png", fig_dir)
+
+    metrics = [
+        ("Objective",    "Weighted Clash Score (↓ better)", axes[0]),
+        ("Solve_Time_s", "Solve Time (seconds)",            axes[1]),
+    ]
+
+    for col, ylabel, ax in metrics:
+        for sc in SCENARIOS:
+            sub = df[df["Scenario"] == sc].dropna(subset=[col])
+            if sub.empty:
+                continue
+            ax.plot(sub["max_events"], sub[col],
+                    marker="o", linewidth=2, label=SCENARIO_LABELS[sc],
+                    color=COLORS[sc])
+
+        ax.set_xlabel("max_events (events per phase)", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.axvline(DEFAULT_MAX_EVENTS, color="grey", linestyle="--",
+                   linewidth=1, label=f"Default ({DEFAULT_MAX_EVENTS})")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "sens_max_events.png")
 
 
-# 5. Runtime comparison bar chart
-def _plot_runtime_comparison(df: pd.DataFrame, fig_dir: Path):
-    """
-    Grouped bar chart: x = method, grouped by scenario,
-    y = wall-clock runtime (s).
-    Secondary twin axis shows clash score.
-    """
+def _plot_time_limit_sweep(df: pd.DataFrame, fig_dir: Path) -> None:
+    """Two-panel: Objective vs time_limit  |  Solve_Time vs time_limit."""
     if df.empty:
         return
 
-    scenarios = sorted(df["Scenario"].unique())
-    # Standardise method column name
-    method_col = "Model"
-    methods    = [m for m in METHOD_ORDER if m in df[method_col].values]
-    if not methods:
-        return
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Sensitivity: time_limit (max_events=500, gap=2%)",
+                 fontsize=13, fontweight="bold")
 
-    x     = np.arange(len(methods))
-    width = 0.35
-    n_sc  = len(scenarios)
-    offsets = np.linspace(-(n_sc - 1) * width / 2,
-                            (n_sc - 1) * width / 2, n_sc)
+    metrics = [
+        ("Objective",    "Weighted Clash Score (↓ better)", axes[0]),
+        ("Solve_Time_s", "Actual Solve Time (seconds)",     axes[1]),
+    ]
 
-    fig, ax1 = plt.subplots(figsize=(11, 6))
-    ax2 = ax1.twinx()
-
-    bars_plotted = []
-    for i, (sc, offset) in enumerate(zip(scenarios, offsets)):
-        sub    = df[df["Scenario"] == sc]
-        times  = [sub[sub[method_col] == m]["Wall_Time_s"].mean()
-                  for m in methods]
-        scores = [sub[sub[method_col] == m]["Objective"].mean()
-                  for m in methods]
-
-        color  = SCENARIO_COLORS.get(sc, f"C{i}")
-        b = ax1.bar(x + offset, times, width * 0.9,
-                    label=f"{sc} — runtime", color=color, alpha=0.80)
-        bars_plotted.append(b)
-
-        # Clash score as line on secondary axis
-        valid_idx = [j for j, s in enumerate(scores) if not np.isnan(s)]
-        if valid_idx:
-            ax2.plot([x[j] + offset for j in valid_idx],
-                     [scores[j] for j in valid_idx],
-                     color=color, marker="D", markersize=8,
-                     linewidth=1.5, linestyle="--",
-                     label=f"{sc} — clash score")
-
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(methods, fontsize=11)
-    ax1.set_xlabel("Method", fontsize=12)
-    ax1.set_ylabel("Wall-Clock Runtime (s)", fontsize=12)
-    ax2.set_ylabel("Weighted Clash Score (lower is better)",
-                   fontsize=12, color="#555")
-
-    ax1.set_title("Runtime & Solution Quality Comparison: All Methods",
-                  fontsize=13, fontweight="bold")
-
-    # Combined legend
-    lines1, labs1 = ax1.get_legend_handles_labels()
-    lines2, labs2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labs1 + labs2,
-               loc="upper left", fontsize=9, ncol=2)
-
-    fig.tight_layout()
-    save_fig(fig, "runtime_comparison.png", fig_dir)
-
-
-# 6. Sensitivity heatmap: max_events × time_limit
-def _plot_sensitivity_heatmap(df_me: pd.DataFrame,
-                               df_tl: pd.DataFrame,
-                               fig_dir: Path):
-    """
-    Heatmap of objective value over a grid of (max_events, time_limit).
-    Combines rows from both sweep DataFrames to approximate the 2D grid.
-    Only uses DEFAULT values for the other parameter.
-    """
-    DEFAULT_TL = 180
-    DEFAULT_ME = 300
-
-    # Rows from max_events sweep: use their time_limit (= DEFAULT_TL)
-    # Rows from time_limit sweep: use their max_events (= DEFAULT_ME)
-    combined_rows = []
-
-    if not df_me.empty:
-        for _, r in df_me.iterrows():
-            combined_rows.append({
-                "Max_Events":   r["Max_Events"],
-                "Time_Limit_s": DEFAULT_TL,
-                "Scenario":     r["Scenario"],
-                "Model":        r["Model"],
-                "Objective":    r["Objective"],
-            })
-    if not df_tl.empty:
-        for _, r in df_tl.iterrows():
-            combined_rows.append({
-                "Max_Events":   DEFAULT_ME,
-                "Time_Limit_s": r["Time_Limit_s"],
-                "Scenario":     r["Scenario"],
-                "Model":        r["Model"],
-                "Objective":    r["Objective"],
-            })
-
-    if not combined_rows:
-        return
-
-    grid_df = pd.DataFrame(combined_rows).dropna(subset=["Objective"])
-    scenarios = sorted(grid_df["Scenario"].unique())
-    models    = sorted(grid_df["Model"].unique())
-
-    n_rows = len(scenarios) * len(models)
-    if n_rows == 0:
-        return
-
-    fig, axes = plt.subplots(len(scenarios), len(models),
-                              figsize=(6 * len(models), 4.5 * len(scenarios)),
-                              squeeze=False)
-    fig.suptitle("Objective Heatmap: max_events × time_limit",
-                 fontsize=14, y=1.02)
-
-    for ri, sc in enumerate(scenarios):
-        for ci, model in enumerate(models):
-            ax = axes[ri][ci]
-            sub = grid_df[(grid_df["Scenario"] == sc) & (grid_df["Model"] == model)]
-
+    for col, ylabel, ax in metrics:
+        for sc in SCENARIOS:
+            sub = df[df["Scenario"] == sc].dropna(subset=[col])
             if sub.empty:
-                ax.set_visible(False)
                 continue
+            ax.plot(sub["time_limit"], sub[col],
+                    marker="s", linewidth=2, label=SCENARIO_LABELS[sc],
+                    color=COLORS[sc])
 
-            pivot = sub.pivot_table(index="Max_Events", columns="Time_Limit_s",
-                                     values="Objective", aggfunc="mean")
-            if pivot.empty:
-                ax.set_visible(False)
+        ax.set_xlabel("time_limit (seconds per phase)", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.axvline(DEFAULT_TIME_LIMIT, color="grey", linestyle="--",
+                   linewidth=1, label=f"Default ({DEFAULT_TIME_LIMIT} s)")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "sens_time_limit.png")
+
+
+def _plot_mip_gap_sweep(df: pd.DataFrame, fig_dir: Path) -> None:
+    """Two-panel: Objective vs mip_gap  |  Solve_Time vs mip_gap (log x-axis)."""
+    if df.empty:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("Sensitivity: mip_gap (max_events=500, time_limit=300 s)",
+                 fontsize=13, fontweight="bold")
+
+    metrics = [
+        ("Objective",    "Weighted Clash Score (↓ better)", axes[0]),
+        ("Solve_Time_s", "Solve Time (seconds)",            axes[1]),
+    ]
+
+    for col, ylabel, ax in metrics:
+        for sc in SCENARIOS:
+            sub = df[df["Scenario"] == sc].dropna(subset=[col])
+            if sub.empty:
                 continue
+            ax.semilogx(sub["mip_gap"] * 100, sub[col],
+                        marker="^", linewidth=2, label=SCENARIO_LABELS[sc],
+                        color=COLORS[sc])
 
-            sns.heatmap(pivot, ax=ax, cmap="YlOrRd_r", annot=True, fmt=".0f",
-                        linewidths=0.5, cbar_kws={"label": "Clash Score"})
-            ax.set_title(f"{model} / {sc}", fontsize=11)
-            ax.set_xlabel("Time Limit (s)", fontsize=10)
-            ax.set_ylabel("Max Events",     fontsize=10)
+        ax.set_xlabel("mip_gap (%)", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.axvline(DEFAULT_MIP_GAP * 100, color="grey", linestyle="--",
+                   linewidth=1, label=f"Default ({DEFAULT_MIP_GAP*100:.1f}%)")
+        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f%%"))
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
 
-    fig.tight_layout()
-    save_fig(fig, "sensitivity_heatmap.png", fig_dir)
-
-
-
-def main():
-    args = parse_args()
-
-    # Check Xpress availability
-    xpress_ok = False
-    if not args.skip_sweep or not args.skip_runtime or True:
-        try:
-            import xpress  # noqa: F401
-            xpress_ok = True
-        except ImportError:
-            print("[ERROR] FICO Xpress is not installed / not on PATH.")
-            print("        MIP sweep and MIP runtime comparisons will be skipped.")
-            print("        Install Xpress and re-run to enable MIP analyses.")
-
-    # Load data
-    print("\n>>> Loading data …")
-    from data_preprocessing import run_preprocessing
-    cleaned_dir = OUT_DIR / "cleaned_data"
-    cleaned_dir.mkdir(exist_ok=True)
-    conflict_path   = cleaned_dir / "conflict_pairs.csv"
-    build_conflicts = not (args.skip_conflicts and conflict_path.exists())
-    if not build_conflicts:
-        print("  Reusing existing conflict_pairs.csv")
-    data = run_preprocessing(build_conflicts=build_conflicts, out_dir=cleaned_dir)
-
-    # Create output dirs
-    sens_dir, fig_dir = make_sens_dirs()
-    print(f"\n  Sensitivity outputs → {sens_dir.relative_to(BASE_DIR)}")
-
-    scenarios = (["S1_9am5pm", "S2_NoFriPM"] if args.scenario == "both"
-                 else [args.scenario])
-
-    # Parameter sweeps
-    if not args.skip_sweep:
-        if not xpress_ok:
-            print("\n>>> PARAMETER SWEEPS — skipped (Xpress unavailable)")
-        else:
-            print("\n>>> PARAMETER SWEEPS")
-            print(f"  Scenarios : {scenarios}")
-            print(f"  Quick mode: {args.quick}")
-            run_parameter_sweeps(data, scenarios,
-                                 args.quick, sens_dir, fig_dir)
-    else:
-        print("\n>>> PARAMETER SWEEPS — skipped (--skip-sweep)")
-
-    # Runtime comparison
-    if not args.skip_runtime:
-        print("\n>>> RUNTIME COMPARISON (all methods)")
-        if not xpress_ok:
-            print("  [INFO] Xpress unavailable — running heuristic methods only.")
-        run_runtime_comparison(data, scenarios, args.heur_iter, sens_dir, fig_dir)
-    else:
-        print("\n>>> RUNTIME COMPARISON — skipped (--skip-runtime)")
-
-    print(f"\n>>> Done. All outputs in:\n    {sens_dir}")
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "sens_mip_gap.png")
 
 
+def _plot_pareto(sweep_results: dict, fig_dir: Path) -> None:
+    """
+    Quality vs Runtime Pareto scatter.
+    Each point = one (scenario, parameter_value) run across all three sweeps.
+    """
+    frames = []
+    for param_name, df in sweep_results.items():
+        tmp = df[["Scenario", "Objective", "Solve_Time_s", "Solve_Status"]].copy()
+        tmp["Param"] = param_name
+        frames.append(tmp)
+
+    if not frames:
+        return
+
+    all_data = pd.concat(frames, ignore_index=True)
+    all_data  = all_data.dropna(subset=["Objective", "Solve_Time_s"])
+
+    if all_data.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    markers = {"max_events": "o", "time_limit": "s", "mip_gap": "^"}
+    for (sc, param), grp in all_data.groupby(["Scenario", "Param"]):
+        ax.scatter(grp["Solve_Time_s"], grp["Objective"],
+                   color=COLORS.get(sc, "grey"),
+                   marker=markers.get(param, "o"),
+                   s=70, alpha=0.75,
+                   label=f"{SCENARIO_LABELS.get(sc, sc)} / {param}")
+
+    ax.set_xlabel("Solve Time (seconds)", fontsize=12)
+    ax.set_ylabel("Weighted Clash Score", fontsize=12)
+    ax.set_title("Quality vs Runtime — Pareto View (all sweeps)", fontsize=13,
+                 fontweight="bold")
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "sens_pareto.png")
+
+
+def _plot_runtime_comparison(df_cmp: pd.DataFrame, fig_dir: Path) -> None:
+    """
+    Grouped bar chart: Runtime and Objective for MIP vs Heuristic.
+    """
+    if df_cmp.empty:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle("MIP vs Heuristic: Runtime and Solution Quality",
+                 fontsize=13, fontweight="bold")
+
+    metrics = [
+        ("Solve_Time_s", "Solve Time (seconds)"),
+        ("Objective",    "Weighted Clash Score"),
+    ]
+
+    for (col, ylabel), ax in zip(metrics, axes):
+        methods  = df_cmp["Method"].unique()
+        sc_list  = df_cmp["Scenario"].unique()
+        n_sc     = len(sc_list)
+        x        = np.arange(n_sc)
+        width    = 0.35
+        n_methods = len(methods)
+
+        for i, method in enumerate(methods):
+            sub    = df_cmp[df_cmp["Method"] == method]
+            vals   = [sub[sub["Scenario"] == sc][col].values[0]
+                      if len(sub[sub["Scenario"] == sc]) > 0 else np.nan
+                      for sc in sc_list]
+            offset = (i - (n_methods - 1) / 2) * width
+            bars   = ax.bar(x + offset, vals, width,
+                            label=method, alpha=0.85)
+            for bar, v in zip(bars, vals):
+                if not np.isnan(v):
+                    ax.text(bar.get_x() + bar.get_width() / 2,
+                            bar.get_height() * 1.01,
+                            f"{v:.0f}", ha="center", va="bottom", fontsize=8)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([SCENARIO_LABELS.get(s, s) for s in sc_list], fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "sens_runtime_comparison.png")
+
+
+def _plot_heatmap(
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    out_dir: Path,
+    fig_dir: Path,
+    scenario: str = "S1_9am5pm",
+) -> None:
+    """
+    Approximate 2-D sensitivity: max_events × time_limit → Objective.
+    Runs a small sub-grid to stay tractable.
+    """
+    me_vals  = [200, 400, 700]
+    tl_vals  = [60, 180, 300]
+    tmp_dir  = out_dir / "_tmp_sens"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[Sensitivity] 2-D heatmap ({scenario}) …")
+    matrix = np.full((len(me_vals), len(tl_vals)), np.nan)
+
+    for i, me in enumerate(me_vals):
+        for j, tl in enumerate(tl_vals):
+            print(f"  max_events={me}  time_limit={tl}s")
+            row = _run_mip_once(
+                scenario       = scenario,
+                events         = events,
+                conflict_pairs = conflict_pairs,
+                max_events     = me,
+                time_limit     = tl,
+                mip_gap        = DEFAULT_MIP_GAP,
+                tmp_dir        = tmp_dir,
+            )
+            matrix[i, j] = row["Objective"]
+
+    # Save raw data
+    hm_df = pd.DataFrame(
+        matrix,
+        index   = [f"me={m}" for m in me_vals],
+        columns = [f"tl={t}s" for t in tl_vals],
+    )
+    hm_df.to_csv(out_dir / f"sensitivity_heatmap_{scenario}.csv")
+
+    if np.all(np.isnan(matrix)):
+        print("  [heatmap] All values NaN — skipping plot.")
+        return
+
+    # Plot
+    vmin = np.nanmin(matrix)
+    vmax = np.nanmax(matrix)
+    if vmin == vmax:
+        vmax = vmin + 1   # avoid zero-range colormap
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd",
+                   vmin=vmin, vmax=vmax, origin="upper")
+    plt.colorbar(im, ax=ax, label="Weighted Clash Score")
+
+    ax.set_xticks(range(len(tl_vals)))
+    ax.set_xticklabels([f"{t}s" for t in tl_vals], fontsize=10)
+    ax.set_yticks(range(len(me_vals)))
+    ax.set_yticklabels([str(m) for m in me_vals], fontsize=10)
+    ax.set_xlabel("time_limit (seconds per phase)", fontsize=11)
+    ax.set_ylabel("max_events (events per phase)",  fontsize=11)
+    ax.set_title(
+        f"2-D Sensitivity: max_events × time_limit\n"
+        f"Scenario: {SCENARIO_LABELS.get(scenario, scenario)}  |  gap={DEFAULT_MIP_GAP*100:.0f}%",
+        fontsize=12, fontweight="bold"
+    )
+
+    # Annotate cells
+    for i in range(len(me_vals)):
+        for j in range(len(tl_vals)):
+            val = matrix[i, j]
+            text = f"{val:.0f}" if not np.isnan(val) else "N/A"
+            ax.text(j, i, text, ha="center", va="center",
+                    fontsize=10, color="black")
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / f"sens_heatmap_{scenario}.png")
+
+
+
+# Main entry point
+def run_sensitivity_analysis(
+    data: dict,
+    out_dir: Path = None,
+    run_heatmap: bool = True,
+    heatmap_scenario: str = "S1_9am5pm",
+) -> dict:
+    """
+    Full sensitivity analysis pipeline.
+
+    Steps
+    -----
+    1. OAT sweeps for max_events, time_limit, mip_gap.
+    2. Runtime comparison: MIP (default) vs Heuristic.
+    3. Six plots: per-parameter sweep (×3), Pareto, runtime comparison, heatmap.
+
+    Parameters
+    ----------
+    data             : dict from data_preprocessing.run_preprocessing()
+    out_dir          : directory for CSV and figure outputs
+                       (default: outputs/sensitivity/)
+    run_heatmap      : whether to run the 2-D heatmap sub-grid (can be slow)
+    heatmap_scenario : which scenario to use for the 2-D heatmap
+
+    Returns
+    -------
+    dict with keys:
+        sweep_results   – dict of DataFrames per parameter
+        comparison_df   – runtime comparison DataFrame
+    """
+    base_dir = out_dir or (Path(__file__).resolve().parent / "outputs" / "sensitivity")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir = base_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "=" * 65)
+    print("  SENSITIVITY ANALYSIS (MIP Parameter Study)")
+    print("=" * 65)
+    print(f"  Output directory: {base_dir}")
+
+    # ── Step 1: OAT sweeps ───────────────────────────────────────────────────
+    sweep_results = run_parameter_sweeps(data, out_dir=base_dir)
+
+    # ── Step 2: Runtime comparison ───────────────────────────────────────────
+    comparison_df = run_runtime_comparison(data, out_dir=base_dir)
+
+    # ── Step 3: Plots ────────────────────────────────────────────────────────
+    print("\n[Sensitivity] Generating plots …")
+
+    _plot_max_events_sweep(sweep_results["max_events"], fig_dir)
+    _plot_time_limit_sweep(sweep_results["time_limit"], fig_dir)
+    _plot_mip_gap_sweep(sweep_results["mip_gap"], fig_dir)
+    _plot_pareto(sweep_results, fig_dir)
+    _plot_runtime_comparison(comparison_df, fig_dir)
+
+    if run_heatmap:
+        _plot_heatmap(
+            events         = data["events"],
+            conflict_pairs = data.get("conflict_pairs"),
+            out_dir        = base_dir,
+            fig_dir        = fig_dir,
+            scenario       = heatmap_scenario,
+        )
+
+    print("\n[Sensitivity] Analysis complete.")
+    print(f"  CSVs  → {base_dir}")
+    print(f"  Plots → {fig_dir}")
+
+    return {
+        "sweep_results": sweep_results,
+        "comparison_df": comparison_df,
+    }
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime Analysis: MIP vs Heuristic across max_events (no time limit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Xpress: setting maxtime=0 disables the wall-clock limit entirely.
+# We represent "no time limit" as time_limit=0 → prob.controls.maxtime = 0.
+_NO_TIME_LIMIT = 0
+
+
+def _run_mip_no_tlimit(
+    scenario: str,
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    max_events: int,
+    mip_gap: float,
+    tmp_dir: Path,
+) -> dict:
+    """
+    Run one two-phase MIP solve with NO time limit.
+
+    Returns a flat metrics dict:
+        Scenario, Model, max_events, Solve_Time_s,
+        Objective, N_Clashes, N_Rescheduled, Solve_Status
+    """
+    base = {
+        "Scenario":      scenario,
+        "Model":         "MIP",
+        "max_events":    max_events,
+        "Solve_Time_s":  np.nan,
+        "Objective":     np.nan,
+        "N_Clashes":     np.nan,
+        "N_Rescheduled": 0,
+        "Solve_Status":  "ERROR",
+    }
+    try:
+        from mip_model import run_mip_scenario
+        t0  = time.time()
+        res = run_mip_scenario(
+            scenario       = scenario,
+            events         = events,
+            conflict_pairs = conflict_pairs,
+            max_events     = max_events,
+            time_limit     = _NO_TIME_LIMIT,  # 0 → Xpress maxtime=0 → no limit
+            mip_gap        = mip_gap,
+            verbose        = False,
+            out_dir        = tmp_dir,
+        )
+        elapsed = time.time() - t0
+        base.update({
+            "Solve_Time_s":  round(elapsed, 2),
+            "Objective":     res.get("objective") or np.nan,
+            "N_Clashes":     res.get("n_clashes", np.nan),
+            "N_Rescheduled": len(res["assignment_df"])
+                             if res.get("assignment_df") is not None else 0,
+            "Solve_Status":  res.get("status", "UNKNOWN"),
+        })
+    except ImportError:
+        print(f"  [runtime] xpress/mip_model not available — skipping MIP "
+              f"(scenario={scenario}, max_events={max_events}).")
+        base["Solve_Status"] = "SKIPPED"
+    except Exception as e:
+        print(f"  [runtime] MIP failed (scenario={scenario}, "
+              f"max_events={max_events}): {e}")
+        traceback.print_exc()
+    return base
+
+
+def _run_heuristic_no_tlimit(
+    scenario: str,
+    events: pd.DataFrame,
+    conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
+    max_events: int,
+    ls_max_iter: int,
+    tmp_dir: Path,
+) -> dict:
+    """
+    Run one Greedy + Local-Search heuristic solve.
+    No time limit is imposed (the heuristic runs until convergence or
+    ls_max_iter is exhausted).
+
+    Returns the same flat metrics schema as _run_mip_no_tlimit.
+    """
+    base = {
+        "Scenario":      scenario,
+        "Model":         "Heuristic",
+        "max_events":    max_events,
+        "Solve_Time_s":  np.nan,
+        "Objective":     np.nan,
+        "N_Clashes":     np.nan,
+        "N_Rescheduled": 0,
+        "Solve_Status":  "ERROR",
+    }
+    try:
+        from heuristic_model import run_heuristic_scenario
+        t0  = time.time()
+        res = run_heuristic_scenario(
+            scenario         = scenario,
+            events           = events,
+            conflict_pairs   = conflict_pairs,
+            student_events   = student_events,
+            max_events       = max_events,
+            run_local_search = True,
+            ls_max_iter      = ls_max_iter,
+            out_dir          = tmp_dir,
+        )
+        elapsed = time.time() - t0
+        sm = res.get("summary", {})
+        ls_score = sm.get("LocalSearch_Clash_Score",
+                          sm.get("Greedy_Clash_Score", np.nan))
+        base.update({
+            "Solve_Time_s":  round(elapsed, 2),
+            "Objective":     ls_score,
+            "N_Clashes":     ls_score,   # same metric for comparability
+            "N_Rescheduled": len(res["assignment_df"])
+                             if res.get("assignment_df") is not None else 0,
+            "Solve_Status":  "FEASIBLE",
+        })
+    except Exception as e:
+        print(f"  [runtime] Heuristic failed (scenario={scenario}, "
+              f"max_events={max_events}): {e}")
+        traceback.print_exc()
+    return base
+
+
+def run_runtime_vs_max_events(
+    data: dict,
+    sweep: list | None = None,
+    mip_gap: float = DEFAULT_MIP_GAP,
+    ls_max_iter: int = 300,
+    out_dir: Path | None = None,
+) -> pd.DataFrame:
+    """
+    Analyse and compare MIP vs Heuristic **run-time** across a range of
+    ``max_events`` values WITHOUT imposing any solver time limit.
+
+    This isolates the pure scaling behaviour of each model:
+    the MIP is allowed to run to proven optimality (or convergence within
+    ``mip_gap``), while the heuristic runs until local-search convergence
+    or ``ls_max_iter`` iterations.
+
+    Parameters
+    ----------
+    data        : dict from ``data_preprocessing.run_preprocessing()``
+    sweep       : list of max_events values to test.
+                  Defaults to [50, 100, 200, 300, 500, 750, 1000].
+    mip_gap     : MIP relative optimality gap tolerance (default 0.02 = 2 %).
+    ls_max_iter : Heuristic local-search iteration cap (default 300).
+    out_dir     : directory for CSV + figure outputs.
+                  Defaults to outputs/runtime_analysis/.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per (scenario, model, max_events) with columns:
+        Scenario, Model, max_events, Solve_Time_s, Objective,
+        N_Clashes, N_Rescheduled, Solve_Status.
+
+    Side-effects
+    ------------
+    Saves to ``out_dir``:
+        runtime_vs_max_events.csv
+        figures/runtime_vs_max_events_time.png
+        figures/runtime_vs_max_events_quality.png
+        figures/runtime_vs_max_events_ratio.png
+        figures/runtime_vs_max_events_summary.png
+    """
+    if sweep is None:
+        sweep = [50, 100, 200, 300, 500, 750, 1000]
+
+    base_dir = out_dir or (
+        Path(__file__).resolve().parent / "outputs" / "runtime_analysis"
+    )
+    base_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir = base_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = base_dir / "_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    events         = data["events"]
+    conflict_pairs = data.get("conflict_pairs")
+    student_events = data["student_events"]
+
+    print("\n" + "=" * 65)
+    print("  RUNTIME ANALYSIS: MIP vs Heuristic (no time limit)")
+    print(f"  max_events sweep : {sweep}")
+    print(f"  mip_gap          : {mip_gap*100:.1f}%")
+    print(f"  ls_max_iter      : {ls_max_iter}")
+    print(f"  Output dir       : {base_dir}")
+    print("=" * 65)
+
+    rows = []
+    total_runs = len(SCENARIOS) * len(sweep) * 2   # ×2 for MIP + Heuristic
+    run_idx    = 0
+
+    for sc in SCENARIOS:
+        for me in sweep:
+            run_idx += 1
+            print(f"\n[{run_idx}/{total_runs}] MIP  | scenario={sc} | max_events={me}")
+            mip_row = _run_mip_no_tlimit(
+                scenario       = sc,
+                events         = events,
+                conflict_pairs = conflict_pairs,
+                max_events     = me,
+                mip_gap        = mip_gap,
+                tmp_dir        = tmp_dir,
+            )
+            rows.append(mip_row)
+            print(f"  → time={mip_row['Solve_Time_s']:.1f}s  "
+                  f"obj={mip_row['Objective']}  "
+                  f"status={mip_row['Solve_Status']}")
+
+            run_idx += 1
+            print(f"\n[{run_idx}/{total_runs}] Heur | scenario={sc} | max_events={me}")
+            heur_row = _run_heuristic_no_tlimit(
+                scenario       = sc,
+                events         = events,
+                conflict_pairs = conflict_pairs,
+                student_events = student_events,
+                max_events     = me,
+                ls_max_iter    = ls_max_iter,
+                tmp_dir        = tmp_dir,
+            )
+            rows.append(heur_row)
+            print(f"  → time={heur_row['Solve_Time_s']:.1f}s  "
+                  f"obj={heur_row['Objective']}  "
+                  f"status={heur_row['Solve_Status']}")
+
+    df = pd.DataFrame(rows)
+    csv_path = base_dir / "runtime_vs_max_events.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\n[runtime] Results saved → {csv_path}")
+
+    # ── Generate plots ────────────────────────────────────────────────────────
+    _plot_runtime_analysis(df, fig_dir, sweep)
+
+    print(f"\n[runtime] All figures saved → {fig_dir}")
+    print("[runtime] Analysis complete.\n")
+    return df
+
+
+# ── Plotting helpers for runtime analysis ─────────────────────────────────────
+
+_MODEL_COLORS  = {"MIP": "#1565C0", "Heuristic": "#E65100"}
+_MODEL_MARKERS = {"MIP": "o",       "Heuristic": "s"}
+_SC_DASH       = {"S1_9am5pm": "-", "S2_NoFriPM": "--"}
+
+
+def _plot_runtime_analysis(df: pd.DataFrame, fig_dir: Path,
+                            sweep: list) -> None:
+    """Generate four figures summarising the runtime analysis."""
+    if df.empty:
+        print("  [plot] Empty DataFrame — skipping plots.")
+        return
+
+    # ── Figure 1: Solve Time vs max_events (one line per model×scenario) ─────
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    fig.suptitle(
+        "Runtime vs max_events — MIP (no time limit) vs Heuristic",
+        fontsize=13, fontweight="bold",
+    )
+
+    for model in ["MIP", "Heuristic"]:
+        for sc in SCENARIOS:
+            sub = df[(df["Model"] == model) & (df["Scenario"] == sc)].copy()
+            sub = sub.dropna(subset=["Solve_Time_s"]).sort_values("max_events")
+            if sub.empty:
+                continue
+            label = f"{model} — {SCENARIO_LABELS[sc]}"
+            color = _MODEL_COLORS[model]
+            ls    = _SC_DASH[sc]
+            marker = _MODEL_MARKERS[model]
+
+            axes[0].plot(sub["max_events"], sub["Solve_Time_s"],
+                         color=color, linestyle=ls, marker=marker,
+                         linewidth=2, label=label)
+
+    axes[0].set_xlabel("max_events (events per phase)", fontsize=11)
+    axes[0].set_ylabel("Solve Time (seconds)", fontsize=11)
+    axes[0].set_title("Solve Time", fontsize=11)
+    axes[0].legend(fontsize=8, loc="upper left")
+    axes[0].grid(True, alpha=0.3)
+
+    # ── Same on log-y scale ───────────────────────────────────────────────────
+    for model in ["MIP", "Heuristic"]:
+        for sc in SCENARIOS:
+            sub = df[(df["Model"] == model) & (df["Scenario"] == sc)].copy()
+            sub = sub.dropna(subset=["Solve_Time_s"]).sort_values("max_events")
+            if sub.empty:
+                continue
+            label  = f"{model} — {SCENARIO_LABELS[sc]}"
+            color  = _MODEL_COLORS[model]
+            ls     = _SC_DASH[sc]
+            marker = _MODEL_MARKERS[model]
+            vals   = sub["Solve_Time_s"].clip(lower=0.01)
+            axes[1].semilogy(sub["max_events"], vals,
+                             color=color, linestyle=ls, marker=marker,
+                             linewidth=2, label=label)
+
+    axes[1].set_xlabel("max_events (events per phase)", fontsize=11)
+    axes[1].set_ylabel("Solve Time (seconds, log scale)", fontsize=11)
+    axes[1].set_title("Solve Time (log scale)", fontsize=11)
+    axes[1].legend(fontsize=8, loc="upper left")
+    axes[1].grid(True, alpha=0.3, which="both")
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "runtime_vs_max_events_time.png")
+
+    # ── Figure 2: Solution Quality (Objective) vs max_events ─────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    fig.suptitle(
+        "Solution Quality vs max_events — MIP vs Heuristic",
+        fontsize=13, fontweight="bold",
+    )
+
+    for ax_idx, sc in enumerate(SCENARIOS):
+        ax = axes[ax_idx]
+        for model in ["MIP", "Heuristic"]:
+            sub = df[(df["Model"] == model) & (df["Scenario"] == sc)].copy()
+            sub = sub.dropna(subset=["Objective"]).sort_values("max_events")
+            if sub.empty:
+                continue
+            ax.plot(sub["max_events"], sub["Objective"],
+                    color=_MODEL_COLORS[model],
+                    marker=_MODEL_MARKERS[model],
+                    linewidth=2, label=model)
+
+        ax.set_xlabel("max_events (events per phase)", fontsize=11)
+        ax.set_ylabel("Weighted Clash Score (↓ better)", fontsize=11)
+        ax.set_title(SCENARIO_LABELS[sc], fontsize=11)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "runtime_vs_max_events_quality.png")
+
+    # ── Figure 3: MIP / Heuristic runtime ratio ───────────────────────────────
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.set_title(
+        "Runtime Ratio: MIP / Heuristic vs max_events",
+        fontsize=13, fontweight="bold",
+    )
+    ax.axhline(1.0, color="grey", linestyle="--", linewidth=1,
+               label="Ratio = 1 (equal speed)")
+
+    for sc in SCENARIOS:
+        mip_s  = df[(df["Model"] == "MIP") & (df["Scenario"] == sc)
+                    ].set_index("max_events")["Solve_Time_s"]
+        heur_s = df[(df["Model"] == "Heuristic") & (df["Scenario"] == sc)
+                    ].set_index("max_events")["Solve_Time_s"]
+        common = sorted(set(mip_s.index) & set(heur_s.index))
+        if not common:
+            continue
+        ratio = [mip_s[me] / max(heur_s[me], 0.001) for me in common]
+        ax.plot(common, ratio,
+                color=COLORS[sc], marker="o", linewidth=2,
+                label=SCENARIO_LABELS[sc])
+
+    ax.set_xlabel("max_events (events per phase)", fontsize=11)
+    ax.set_ylabel("Runtime Ratio  (MIP time / Heuristic time)", fontsize=11)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "runtime_vs_max_events_ratio.png")
+
+    # ── Figure 4: 2×2 summary dashboard ──────────────────────────────────────
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(
+        "Runtime Analysis Dashboard — MIP vs Heuristic (no time limit)",
+        fontsize=14, fontweight="bold",
+    )
+
+    # (0,0) — runtime, linear
+    ax = axes[0, 0]
+    for model in ["MIP", "Heuristic"]:
+        for sc in SCENARIOS:
+            sub = df[(df["Model"] == model) & (df["Scenario"] == sc)
+                     ].dropna(subset=["Solve_Time_s"]).sort_values("max_events")
+            if sub.empty:
+                continue
+            ax.plot(sub["max_events"], sub["Solve_Time_s"],
+                    color=_MODEL_COLORS[model], linestyle=_SC_DASH[sc],
+                    marker=_MODEL_MARKERS[model], linewidth=2,
+                    label=f"{model} {SCENARIO_LABELS[sc]}")
+    ax.set_xlabel("max_events"); ax.set_ylabel("Solve Time (s)")
+    ax.set_title("(a) Solve Time vs max_events (linear)"); ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+
+    # (0,1) — runtime, log
+    ax = axes[0, 1]
+    for model in ["MIP", "Heuristic"]:
+        for sc in SCENARIOS:
+            sub = df[(df["Model"] == model) & (df["Scenario"] == sc)
+                     ].dropna(subset=["Solve_Time_s"]).sort_values("max_events")
+            if sub.empty:
+                continue
+            ax.semilogy(sub["max_events"],
+                        sub["Solve_Time_s"].clip(lower=0.01),
+                        color=_MODEL_COLORS[model], linestyle=_SC_DASH[sc],
+                        marker=_MODEL_MARKERS[model], linewidth=2,
+                        label=f"{model} {SCENARIO_LABELS[sc]}")
+    ax.set_xlabel("max_events"); ax.set_ylabel("Solve Time (s, log)")
+    ax.set_title("(b) Solve Time vs max_events (log scale)"); ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3, which="both")
+
+    # (1,0) — quality (objective) per scenario
+    ax = axes[1, 0]
+    for model in ["MIP", "Heuristic"]:
+        for sc in SCENARIOS:
+            sub = df[(df["Model"] == model) & (df["Scenario"] == sc)
+                     ].dropna(subset=["Objective"]).sort_values("max_events")
+            if sub.empty:
+                continue
+            ax.plot(sub["max_events"], sub["Objective"],
+                    color=_MODEL_COLORS[model], linestyle=_SC_DASH[sc],
+                    marker=_MODEL_MARKERS[model], linewidth=2,
+                    label=f"{model} {SCENARIO_LABELS[sc]}")
+    ax.set_xlabel("max_events"); ax.set_ylabel("Weighted Clash Score (↓)")
+    ax.set_title("(c) Solution Quality vs max_events"); ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+
+    # (1,1) — runtime ratio
+    ax = axes[1, 1]
+    ax.axhline(1.0, color="grey", linestyle="--", linewidth=1,
+               label="Ratio = 1")
+    for sc in SCENARIOS:
+        mip_s  = df[(df["Model"] == "MIP") & (df["Scenario"] == sc)
+                    ].set_index("max_events")["Solve_Time_s"]
+        heur_s = df[(df["Model"] == "Heuristic") & (df["Scenario"] == sc)
+                    ].set_index("max_events")["Solve_Time_s"]
+        common = sorted(set(mip_s.index) & set(heur_s.index))
+        if not common:
+            continue
+        ratio = [mip_s[me] / max(heur_s[me], 0.001) for me in common]
+        ax.plot(common, ratio, color=COLORS[sc], marker="o",
+                linewidth=2, label=SCENARIO_LABELS[sc])
+    ax.set_xlabel("max_events"); ax.set_ylabel("MIP time / Heuristic time")
+    ax.set_title("(d) Runtime Ratio MIP / Heuristic"); ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "runtime_vs_max_events_summary.png")
+
+
+# Standalone entry point
 if __name__ == "__main__":
-    main()
+    import argparse
+    from data_preprocessing import run_preprocessing
+
+    parser = argparse.ArgumentParser(
+        description="MIP parameter sensitivity analysis + runtime comparison"
+    )
+    parser.add_argument(
+        "--no-heatmap", action="store_true",
+        help="Skip the 2-D heatmap sub-grid (saves time)"
+    )
+    parser.add_argument(
+        "--heatmap-scenario", default="S1_9am5pm",
+        choices=["S1_9am5pm", "S2_NoFriPM"],
+        help="Scenario to use for the 2-D heatmap"
+    )
+    parser.add_argument(
+        "--skip-conflicts", action="store_true",
+        help="Load existing conflict_pairs.csv instead of rebuilding"
+    )
+    parser.add_argument(
+        "--runtime-only", action="store_true",
+        help="Run ONLY the runtime-vs-max_events analysis (skip OAT sweeps)"
+    )
+    parser.add_argument(
+        "--runtime-sweep", type=int, nargs="+",
+        default=[50, 100, 200, 300, 500, 750, 1000],
+        metavar="N",
+        help="max_events values for runtime analysis "
+             "(default: 50 100 200 300 500 750 1000)"
+    )
+    parser.add_argument(
+        "--mip-gap", type=float, default=DEFAULT_MIP_GAP,
+        help=f"MIP optimality gap for runtime analysis (default: {DEFAULT_MIP_GAP})"
+    )
+    parser.add_argument(
+        "--ls-iter", type=int, default=300,
+        help="Heuristic local-search max iterations (default: 300)"
+    )
+    args = parser.parse_args()
+
+    _CLEANED = Path(__file__).resolve().parent / "outputs" / "cleaned_data"
+    _CLEANED.mkdir(parents=True, exist_ok=True)
+
+    conflict_path   = _CLEANED / "conflict_pairs.csv"
+    build_conflicts = not (args.skip_conflicts and conflict_path.exists())
+
+    data = run_preprocessing(
+        build_conflicts = build_conflicts,
+        out_dir         = _CLEANED,
+    )
+
+    if args.runtime_only:
+        # ── Runtime-only mode ─────────────────────────────────────────────────
+        run_runtime_vs_max_events(
+            data        = data,
+            sweep       = args.runtime_sweep,
+            mip_gap     = args.mip_gap,
+            ls_max_iter = args.ls_iter,
+        )
+    else:
+        # ── Full sensitivity + runtime analysis ───────────────────────────────
+        run_sensitivity_analysis(
+            data             = data,
+            run_heatmap      = not args.no_heatmap,
+            heatmap_scenario = args.heatmap_scenario,
+        )
+        run_runtime_vs_max_events(
+            data        = data,
+            sweep       = args.runtime_sweep,
+            mip_gap     = args.mip_gap,
+            ls_max_iter = args.ls_iter,
+        )
