@@ -295,53 +295,78 @@ def detect_clashes(events: pd.DataFrame,
         ["Event_ID", "Module_Code", "Day", "Start_Hour", "End_Hour", "WholeClass", "Semester"]
     ].copy()
 
-    # Merge student-events with event times
-    se_times = student_events.merge(in_window, on="Event_ID", how="inner",
-                                    suffixes=("_st", "_ev"))
+    # Build a canonical slot ID: one representative Event_ID per
+    # (Module_Code, Day, Start_Hour, Semester) recurring timeslot.
+    # Multiple Event_IDs sharing the same slot (different teaching weeks of
+    # the same recurring event) collapse to this single representative so that
+    # the same structural clash is never counted more than once.
+    canonical = (
+        in_window.sort_values("Event_ID")
+        .groupby(["Module_Code", "Day", "Start_Hour", "Semester"])
+        .agg(Canon_EID=("Event_ID", "first"),
+             End_Hour=("End_Hour", "first"),
+             WholeClass=("WholeClass", "first"))
+        .reset_index()
+    )
 
-    # Use Semester from events (Semester_ev after merge)
-    if "Semester_ev" in se_times.columns:
-        se_times["Sem"] = se_times["Semester_ev"]
-    elif "Semester" in se_times.columns:
-        se_times["Sem"] = se_times["Semester"]
-    else:
-        se_times["Sem"] = "Semester 1"
+    # Merge student-events with event times.
+    # Use only Event_ID from student_events to avoid Semester column collision.
+    se_times = student_events[["AnonID", "Event_ID"]].merge(
+        in_window[["Event_ID", "Module_Code", "Day", "Start_Hour", "End_Hour", "WholeClass", "Semester"]],
+        on="Event_ID", how="inner"
+    )
+    # Rename Semester from events table to Sem
+    se_times.rename(columns={"Semester": "Sem"}, inplace=True)
 
-    # Deduplicate to unique weekly recurring timeslots per (student, module, day, semester)
+    # Attach canonical slot ID
+    se_times = se_times.merge(
+        canonical[["Module_Code", "Day", "Start_Hour", "Semester", "Canon_EID"]],
+        left_on=["Module_Code", "Day", "Start_Hour", "Sem"],
+        right_on=["Module_Code", "Day", "Start_Hour", "Semester"],
+        how="left"
+    ).drop(columns=["Semester"], errors="ignore")
+
+    # Deduplicate to unique recurring weekly timeslots per student:
+    # one row per (AnonID, Canon_EID) — collapses multi-week occurrences
+    # and ensures each structural slot appears once per student.
     weekly_slots = (
-        se_times.groupby(["AnonID", "Module_Code", "Day", "Start_Hour", "End_Hour", "Sem", "WholeClass"])
+        se_times.groupby(["AnonID", "Canon_EID", "Module_Code", "Day",
+                          "Start_Hour", "End_Hour", "Sem", "WholeClass"])
         .first()
         .reset_index()
     )
 
     print(f"  Weekly unique slots (after deduplication): {len(weekly_slots):,}")
 
-    # Group by (student, day, semester) and check for overlapping events
+    # Group by (student, day, semester) and check for overlapping slots.
+    # Clash pairs are tracked as unique (Canon_EID_A, Canon_EID_B) tuples —
+    # each structural clash counted exactly once, regardless of how many
+    # students share it or how many weeks it recurs.
     students_with_any_clash = set()
-    total_pairs = 0
+    unique_clash_pairs = {}   # (canon_eid_a, canon_eid_b) -> severity
     sev = {1: 0, 2: 0, 3: 0}
 
     for (student, day, sem), grp in weekly_slots.groupby(["AnonID", "Day", "Sem"]):
-        events_list = grp[["Module_Code", "Start_Hour", "End_Hour", "WholeClass"]].values.tolist()
-        n = len(events_list)
+        slots = grp[["Canon_EID", "Module_Code", "Start_Hour", "End_Hour", "WholeClass"]].values.tolist()
+        n = len(slots)
         for i in range(n):
             for j in range(i + 1, n):
-                e1 = events_list[i]
-                e2 = events_list[j]
-                # Skip if same module or jointly-taught siblings (set-intersection check)
-                if _share_module_code(e1[0], e2[0]):
+                s1 = slots[i]   # [canon_eid, mod, start, end, wc]
+                s2 = slots[j]
+                # Skip same module or jointly-taught siblings
+                if _share_module_code(s1[1], s2[1]):
                     continue
                 # Check time overlap
-                if e1[1] < e2[2] and e2[1] < e1[2]:
-                    total_pairs += 1
+                if s1[2] < s2[3] and s2[2] < s1[3]:
                     students_with_any_clash.add(student)
-                    wc1, wc2 = bool(e1[3]), bool(e2[3])
-                    if wc1 and wc2:
-                        sev[3] += 1
-                    elif wc1 or wc2:
-                        sev[2] += 1
-                    else:
-                        sev[1] += 1
+                    pair_key = tuple(sorted([s1[0], s2[0]]))
+                    if pair_key not in unique_clash_pairs:
+                        wc1, wc2 = bool(s1[4]), bool(s2[4])
+                        level = 3 if (wc1 and wc2) else 2 if (wc1 or wc2) else 1
+                        unique_clash_pairs[pair_key] = level
+                        sev[level] += 1
+
+    total_pairs = len(unique_clash_pairs)
 
     total_students = student_events["AnonID"].nunique()
     return {
