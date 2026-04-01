@@ -57,7 +57,7 @@ DEFAULT_TIME_LIMIT = 300
 DEFAULT_MIP_GAP    = 0.02
 
 # Sweep ranges
-SWEEP_MAX_EVENTS  = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+SWEEP_MAX_EVENTS  = [200, 300, 400, 500, 600, 700, 800, 900, 1000]
 SWEEP_TIME_LIMITS = [30, 60, 120, 180, 300, 400, 500]
 SWEEP_MIP_GAPS    = [0.005, 0.01, 0.02, 0.05, 0.10]
 
@@ -78,60 +78,82 @@ def _run_mip_once(
     scenario: str,
     events: pd.DataFrame,
     conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
     max_events: int,
     time_limit: int,
     mip_gap: float,
     tmp_dir: Path,
-) -> dict:
+) -> list:
     """
-    Run one two-phase MIP solve and return a flat metrics dict.
+    Run one two-phase MIP solve (per-semester) and return a list of flat metric
+    dicts — one row per semester plus one "Combined" summary row.
 
-    Returns dict with keys:
-        Scenario, max_events, time_limit, mip_gap,
-        Objective, Solve_Time_s, N_Clashes, N_Rescheduled, Solve_Status
-    Returns a dict with Solve_Status='ERROR' on any exception.
+    Each row contains:
+        Scenario, Semester, max_events, time_limit, mip_gap,
+        Total_Clash_Score, DD_Clash_Score, DF_Clash_Score,
+        Solve_Time_s, N_Clashes, N_Rescheduled, Solve_Status
     """
-    base = {
-        "Scenario":      scenario,
-        "max_events":    max_events,
-        "time_limit":    time_limit,
-        "mip_gap":       mip_gap,
-        "Objective":     np.nan,
-        "Solve_Time_s":  np.nan,
-        "N_Clashes":     np.nan,
-        "N_Rescheduled": 0,
-        "Solve_Status":  "ERROR",
+    param_base = {
+        "Scenario":         scenario,
+        "max_events":       max_events,
+        "time_limit":       time_limit,
+        "mip_gap":          mip_gap,
     }
+    err_row = dict(param_base, Semester="Combined",
+                   Total_Clash_Score=np.nan, DD_Clash_Score=np.nan,
+                   DF_Clash_Score=np.nan, Solve_Time_s=np.nan,
+                   N_Clashes=np.nan, N_Rescheduled=0, Solve_Status="ERROR")
     try:
-        from mip_model import run_mip_scenario
+        from mip_new import run_mip_scenario_new
         t0  = time.time()
-        res = run_mip_scenario(
+        res = run_mip_scenario_new(
             scenario       = scenario,
             events         = events,
             conflict_pairs = conflict_pairs,
+            student_events = student_events,
             max_events     = max_events,
             time_limit     = time_limit,
             mip_gap        = mip_gap,
             verbose        = False,
             out_dir        = tmp_dir,
         )
-        elapsed = time.time() - t0
+        elapsed = round(time.time() - t0, 1)
 
-        base.update({
-            "Objective":     res.get("objective") or np.nan,
-            "Solve_Time_s":  round(elapsed, 1),
-            "N_Clashes":     res.get("n_clashes", np.nan),
-            "N_Rescheduled": len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
-            "Solve_Status":  res.get("status", "UNKNOWN"),
-        })
+        rows = []
+        for sem, sr in res.get("sem_results", {}).items():
+            rows.append(dict(
+                param_base,
+                Semester         = sem,
+                Total_Clash_Score= sr.get("total_clash_score", np.nan),
+                DD_Clash_Score   = sr.get("dd_clash_score",    np.nan),
+                DF_Clash_Score   = sr.get("df_clash_score",    np.nan),
+                Solve_Time_s     = elapsed,   # total elapsed for both semesters
+                N_Clashes        = sr.get("n_clashes",         np.nan),
+                N_Rescheduled    = len(sr["assignment_df"]) if sr.get("assignment_df") is not None else 0,
+                Solve_Status     = sr.get("status", "UNKNOWN"),
+            ))
+        # Combined row
+        rows.append(dict(
+            param_base,
+            Semester         = "Combined",
+            Total_Clash_Score= res.get("total_clash_score", np.nan),
+            DD_Clash_Score   = res.get("dd_clash_score",    np.nan),
+            DF_Clash_Score   = res.get("df_clash_score",    np.nan),
+            Solve_Time_s     = elapsed,
+            N_Clashes        = res.get("n_clashes",         np.nan),
+            N_Rescheduled    = len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
+            Solve_Status     = res.get("status", "UNKNOWN"),
+        ))
+        return rows
+
     except ImportError:
-        print("  [sensitivity] xpress / mip_model not available — skipping MIP run.")
-        base["Solve_Status"] = "SKIPPED"
+        print("  [sensitivity] xpress / mip_new not available — skipping MIP run.")
+        err_row["Solve_Status"] = "SKIPPED"
     except Exception as e:
         print(f"  [sensitivity] MIP run failed ({scenario}, max_events={max_events}, "
               f"time_limit={time_limit}, mip_gap={mip_gap}): {e}")
         traceback.print_exc()
-    return base
+    return [err_row]
 
 
 def _run_heuristic_once(
@@ -140,48 +162,72 @@ def _run_heuristic_once(
     conflict_pairs: pd.DataFrame,
     student_events: pd.DataFrame,
     tmp_dir: Path,
-) -> dict:
+) -> list:
     """
-    Run one greedy + local-search heuristic solve.
+    Run one greedy + local-search heuristic solve (per-semester).
+    Returns a list of flat metric dicts — one per semester plus "Combined".
     使用 DEFAULT_MAX_EVENTS 与 MIP 保持相同问题规模，确保 runtime 对比公平。
-    Returns flat metrics dict for runtime comparison.
     """
-    base = {
-        "Scenario":      scenario,
-        "Method":        "Heuristic (Greedy+LS)",
-        "Objective":     np.nan,
-        "Solve_Time_s":  np.nan,
-        "N_Clashes":     np.nan,
-        "N_Rescheduled": 0,
-        "Solve_Status":  "ERROR",
+    err_row = {
+        "Scenario": scenario, "Semester": "Combined", "Method": "Heuristic (Greedy+LS)",
+        "Total_Clash_Score": np.nan, "DD_Clash_Score": np.nan, "DF_Clash_Score": np.nan,
+        "Solve_Time_s": np.nan, "N_Rescheduled": 0, "Solve_Status": "ERROR",
     }
     try:
-        from heuristic_model import run_heuristic_scenario
+        from heuristic_new import run_heuristic_scenario_new
         t0  = time.time()
-        res = run_heuristic_scenario(
+        res = run_heuristic_scenario_new(
             scenario         = scenario,
             events           = events,
             conflict_pairs   = conflict_pairs,
             student_events   = student_events,
-            max_events       = DEFAULT_MAX_EVENTS,   # 与 MIP 使用相同规模，确保公平对比
+            max_events       = DEFAULT_MAX_EVENTS,
             run_local_search = True,
             ls_max_iter      = 300,
             out_dir          = tmp_dir,
         )
-        elapsed = time.time() - t0
+        elapsed = round(time.time() - t0, 1)
 
+        rows = []
+        for sem, sr in res.get("sem_results", {}).items():
+            ls  = sr.get("ls_full_score",     sr.get("greedy_full_score", np.nan))
+            dd  = sr.get("ls_dd_score",       sr.get("greedy_dd_score",   np.nan))
+            gls = sr.get("greedy_full_score", np.nan)
+            df_score = (ls - dd) if (not np.isnan(ls) and not np.isnan(dd)) else np.nan
+            rows.append({
+                "Scenario":          scenario,
+                "Semester":          sem,
+                "Method":            "Heuristic (Greedy+LS)",
+                "Total_Clash_Score": ls,
+                "DD_Clash_Score":    dd,
+                "DF_Clash_Score":    df_score,
+                "Greedy_Score":      gls,
+                "Solve_Time_s":      elapsed,
+                "N_Rescheduled":     len(sr["assignment_df"]) if sr.get("assignment_df") is not None else 0,
+                "Solve_Status":      "FEASIBLE",
+            })
         summary = res.get("summary", {})
-        base.update({
-            "Objective":     summary.get("LocalSearch_Clash_Score", summary.get("Greedy_Clash_Score", np.nan)),
-            "Solve_Time_s":  round(elapsed, 1),
-            "N_Clashes":     summary.get("LocalSearch_Clash_Score", np.nan),
-            "N_Rescheduled": len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
-            "Solve_Status":  "FEASIBLE",
+        ls_full = summary.get("LocalSearch_Full_Clash_Score",
+                               summary.get("Greedy_Full_Clash_Score", np.nan))
+        ls_dd   = summary.get("LocalSearch_DD_Clash_Score",
+                               summary.get("Greedy_DD_Clash_Score",   np.nan))
+        rows.append({
+            "Scenario":          scenario,
+            "Semester":          "Combined",
+            "Method":            "Heuristic (Greedy+LS)",
+            "Total_Clash_Score": ls_full,
+            "DD_Clash_Score":    ls_dd,
+            "DF_Clash_Score":    (ls_full - ls_dd) if (not np.isnan(ls_full) and not np.isnan(ls_dd)) else np.nan,
+            "Greedy_Score":      summary.get("Greedy_Full_Clash_Score", np.nan),
+            "Solve_Time_s":      elapsed,
+            "N_Rescheduled":     len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
+            "Solve_Status":      "FEASIBLE",
         })
+        return rows
     except Exception as e:
         print(f"  [sensitivity] Heuristic run failed ({scenario}): {e}")
         traceback.print_exc()
-    return base
+    return [err_row]
 
 
 
@@ -189,6 +235,7 @@ def _run_heuristic_once(
 def _sweep_max_events(
     events: pd.DataFrame,
     conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
     out_dir: Path,
 ) -> pd.DataFrame:
     """Sweep max_events; hold time_limit and mip_gap at defaults."""
@@ -200,16 +247,16 @@ def _sweep_max_events(
     for sc in SCENARIOS:
         for me in SWEEP_MAX_EVENTS:
             print(f"  scenario={sc}  max_events={me}")
-            row = _run_mip_once(
+            rows.extend(_run_mip_once(
                 scenario       = sc,
                 events         = events,
                 conflict_pairs = conflict_pairs,
+                student_events = student_events,
                 max_events     = me,
                 time_limit     = DEFAULT_TIME_LIMIT,
                 mip_gap        = DEFAULT_MIP_GAP,
                 tmp_dir        = tmp_dir,
-            )
-            rows.append(row)
+            ))
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "sensitivity_max_events.csv", index=False)
@@ -220,6 +267,7 @@ def _sweep_max_events(
 def _sweep_time_limit(
     events: pd.DataFrame,
     conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
     out_dir: Path,
 ) -> pd.DataFrame:
     """Sweep time_limit; hold max_events and mip_gap at defaults."""
@@ -231,16 +279,16 @@ def _sweep_time_limit(
     for sc in SCENARIOS:
         for tl in SWEEP_TIME_LIMITS:
             print(f"  scenario={sc}  time_limit={tl}s")
-            row = _run_mip_once(
+            rows.extend(_run_mip_once(
                 scenario       = sc,
                 events         = events,
                 conflict_pairs = conflict_pairs,
+                student_events = student_events,
                 max_events     = DEFAULT_MAX_EVENTS,
                 time_limit     = tl,
                 mip_gap        = DEFAULT_MIP_GAP,
                 tmp_dir        = tmp_dir,
-            )
-            rows.append(row)
+            ))
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "sensitivity_time_limit.csv", index=False)
@@ -251,6 +299,7 @@ def _sweep_time_limit(
 def _sweep_mip_gap(
     events: pd.DataFrame,
     conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
     out_dir: Path,
 ) -> pd.DataFrame:
     """Sweep mip_gap; hold max_events and time_limit at defaults."""
@@ -262,16 +311,16 @@ def _sweep_mip_gap(
     for sc in SCENARIOS:
         for gap in SWEEP_MIP_GAPS:
             print(f"  scenario={sc}  mip_gap={gap:.3f}")
-            row = _run_mip_once(
+            rows.extend(_run_mip_once(
                 scenario       = sc,
                 events         = events,
                 conflict_pairs = conflict_pairs,
+                student_events = student_events,
                 max_events     = DEFAULT_MAX_EVENTS,
                 time_limit     = DEFAULT_TIME_LIMIT,
                 mip_gap        = gap,
                 tmp_dir        = tmp_dir,
-            )
-            rows.append(row)
+            ))
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "sensitivity_mip_gap.csv", index=False)
@@ -290,12 +339,13 @@ def run_parameter_sweeps(data: dict, out_dir: Path) -> dict:
     """
     events         = data["events"]
     conflict_pairs = data.get("conflict_pairs")
+    student_events = data["student_events"]
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df_me  = _sweep_max_events(events, conflict_pairs, out_dir)
-    df_tl  = _sweep_time_limit(events, conflict_pairs, out_dir)
-    df_gap = _sweep_mip_gap(events, conflict_pairs, out_dir)
+    df_me  = _sweep_max_events(events, conflict_pairs, student_events, out_dir)
+    df_tl  = _sweep_time_limit(events, conflict_pairs, student_events, out_dir)
+    df_gap = _sweep_mip_gap(events, conflict_pairs, student_events, out_dir)
 
     return {
         "max_events": df_me,
@@ -324,31 +374,34 @@ def run_runtime_comparison(data: dict, out_dir: Path) -> pd.DataFrame:
     for sc in SCENARIOS:
         # MIP with default parameters
         print(f"  MIP  scenario={sc}")
-        mip_row = _run_mip_once(
+        mip_rows = _run_mip_once(
             scenario       = sc,
             events         = events,
             conflict_pairs = conflict_pairs,
+            student_events = student_events,
             max_events     = DEFAULT_MAX_EVENTS,
             time_limit     = DEFAULT_TIME_LIMIT,
             mip_gap        = DEFAULT_MIP_GAP,
             tmp_dir        = tmp_dir,
         )
-        mip_row["Method"] = f"MIP (Xpress, {DEFAULT_MAX_EVENTS} events)"
-        rows.append(mip_row)
+        for r in mip_rows:
+            r["Method"] = f"MIP (Xpress)"
+        rows.extend(mip_rows)
 
         # Heuristic
         print(f"  Heur scenario={sc}")
-        heur_row = _run_heuristic_once(
+        heur_rows = _run_heuristic_once(
             scenario       = sc,
             events         = events,
             conflict_pairs = conflict_pairs,
             student_events = student_events,
             tmp_dir        = tmp_dir,
         )
-        heur_row["max_events"]  = DEFAULT_MAX_EVENTS
-        heur_row["time_limit"]  = DEFAULT_TIME_LIMIT
-        heur_row["mip_gap"]     = DEFAULT_MIP_GAP
-        rows.append(heur_row)
+        for r in heur_rows:
+            r["max_events"] = DEFAULT_MAX_EVENTS
+            r["time_limit"] = DEFAULT_TIME_LIMIT
+            r["mip_gap"]    = DEFAULT_MIP_GAP
+        rows.extend(heur_rows)
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "sensitivity_runtime_comparison.csv", index=False)
@@ -364,104 +417,143 @@ def _savefig(fig: plt.Figure, path: Path) -> None:
     print(f"  Saved → {path}")
 
 
+# ── Subplot layout constants ───────────────────────────────────────────────────
+SEMESTERS     = ["Semester 1", "Semester 2"]
+SEM_COLORS    = {"Semester 1": "#1976D2", "Semester 2": "#E64A19"}   # blue / orange
+SEM_LINESTYLE = {"Semester 1": "-",       "Semester 2": "--"}
+METHOD_COLORS = {"MIP (Xpress)": "#1565C0", "Heuristic (Greedy+LS)": "#E65100"}
+METHOD_HATCH  = {"MIP (Xpress)": "",        "Heuristic (Greedy+LS)": "///"}
+
+
+def _make_2x2_axes(title: str):
+    """Return (fig, axes_2x2) for a 2-scenario × 2-semester grid."""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10), sharey="row")
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=1.01)
+    for row_i, sc in enumerate(SCENARIOS):
+        for col_j, sem in enumerate(SEMESTERS):
+            axes[row_i, col_j].set_title(
+                f"{SCENARIO_LABELS[sc]} — {sem}", fontsize=11, fontweight="bold"
+            )
+    return fig, axes
+
+
 def _plot_max_events_sweep(df: pd.DataFrame, fig_dir: Path) -> None:
-    """Two-panel: Objective vs max_events  |  Solve_Time vs max_events."""
-    if df.empty:
+    """2×2 grid: rows=scenario, cols=semester. Each panel: Total_Clash_Score vs max_events."""
+    data = df[df["Semester"] != "Combined"] if "Semester" in df.columns else df
+    if data.empty:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle("Sensitivity: max_events (time_limit=300 s, gap=2%)",
-                 fontsize=13, fontweight="bold")
+    fig, axes = _make_2x2_axes(
+        f"Sensitivity — max_events  (time_limit={DEFAULT_TIME_LIMIT}s, gap={DEFAULT_MIP_GAP*100:.0f}%)"
+    )
 
-    metrics = [
-        ("Objective",    "Weighted Clash Score (↓ better)", axes[0]),
-        ("Solve_Time_s", "Solve Time (seconds)",            axes[1]),
-    ]
-
-    for col, ylabel, ax in metrics:
-        for sc in SCENARIOS:
-            sub = df[df["Scenario"] == sc].dropna(subset=[col])
-            if sub.empty:
-                continue
-            ax.plot(sub["max_events"], sub[col],
-                    marker="o", linewidth=2, label=SCENARIO_LABELS[sc],
-                    color=COLORS[sc])
-
-        ax.set_xlabel("max_events (events per phase)", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.axvline(DEFAULT_MAX_EVENTS, color="grey", linestyle="--",
-                   linewidth=1, label=f"Default ({DEFAULT_MAX_EVENTS})")
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
+    for row_i, sc in enumerate(SCENARIOS):
+        for col_j, sem in enumerate(SEMESTERS):
+            ax  = axes[row_i, col_j]
+            sub = data[(data["Scenario"] == sc) & (data["Semester"] == sem)].dropna(
+                subset=["Total_Clash_Score"]
+            ).sort_values("max_events")
+            if not sub.empty:
+                ax.plot(sub["max_events"], sub["Total_Clash_Score"],
+                        marker="o", linewidth=2, color=SEM_COLORS[sem], label="Clash Score")
+                ax2 = ax.twinx()
+                sub2 = data[(data["Scenario"] == sc) & (data["Semester"] == sem)].dropna(
+                    subset=["Solve_Time_s"]
+                ).sort_values("max_events")
+                ax2.plot(sub2["max_events"], sub2["Solve_Time_s"],
+                         marker="s", linewidth=1.5, linestyle="--",
+                         color="grey", alpha=0.7, label="Solve Time")
+                ax2.set_ylabel("Solve Time (s)", fontsize=9, color="grey")
+                ax2.tick_params(axis="y", labelcolor="grey")
+                lines1, labels1 = ax.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper left")
+            ax.axvline(DEFAULT_MAX_EVENTS, color="grey", linestyle=":", linewidth=1,
+                       label=f"Default ({DEFAULT_MAX_EVENTS})")
+            ax.set_xlabel("max_events", fontsize=10)
+            ax.set_ylabel("Total Clash Score (↓ better)", fontsize=10)
+            ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     _savefig(fig, fig_dir / "sens_max_events.png")
 
 
 def _plot_time_limit_sweep(df: pd.DataFrame, fig_dir: Path) -> None:
-    """Two-panel: Objective vs time_limit  |  Solve_Time vs time_limit."""
-    if df.empty:
+    """2×2 grid: rows=scenario, cols=semester. Each panel: Total_Clash_Score vs time_limit."""
+    data = df[df["Semester"] != "Combined"] if "Semester" in df.columns else df
+    if data.empty:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle("Sensitivity: time_limit (max_events=500, gap=2%)",
-                 fontsize=13, fontweight="bold")
+    fig, axes = _make_2x2_axes(
+        f"Sensitivity — time_limit  (max_events={DEFAULT_MAX_EVENTS}, gap={DEFAULT_MIP_GAP*100:.0f}%)"
+    )
 
-    metrics = [
-        ("Objective",    "Weighted Clash Score (↓ better)", axes[0]),
-        ("Solve_Time_s", "Actual Solve Time (seconds)",     axes[1]),
-    ]
-
-    for col, ylabel, ax in metrics:
-        for sc in SCENARIOS:
-            sub = df[df["Scenario"] == sc].dropna(subset=[col])
-            if sub.empty:
-                continue
-            ax.plot(sub["time_limit"], sub[col],
-                    marker="s", linewidth=2, label=SCENARIO_LABELS[sc],
-                    color=COLORS[sc])
-
-        ax.set_xlabel("time_limit (seconds per phase)", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.axvline(DEFAULT_TIME_LIMIT, color="grey", linestyle="--",
-                   linewidth=1, label=f"Default ({DEFAULT_TIME_LIMIT} s)")
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
+    for row_i, sc in enumerate(SCENARIOS):
+        for col_j, sem in enumerate(SEMESTERS):
+            ax  = axes[row_i, col_j]
+            sub = data[(data["Scenario"] == sc) & (data["Semester"] == sem)].dropna(
+                subset=["Total_Clash_Score"]
+            ).sort_values("time_limit")
+            if not sub.empty:
+                ax.plot(sub["time_limit"], sub["Total_Clash_Score"],
+                        marker="s", linewidth=2, color=SEM_COLORS[sem], label="Clash Score")
+                ax2 = ax.twinx()
+                sub2 = data[(data["Scenario"] == sc) & (data["Semester"] == sem)].dropna(
+                    subset=["Solve_Time_s"]
+                ).sort_values("time_limit")
+                ax2.plot(sub2["time_limit"], sub2["Solve_Time_s"],
+                         marker="o", linewidth=1.5, linestyle="--",
+                         color="grey", alpha=0.7, label="Solve Time")
+                ax2.set_ylabel("Solve Time (s)", fontsize=9, color="grey")
+                ax2.tick_params(axis="y", labelcolor="grey")
+                lines1, labels1 = ax.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper right")
+            ax.axvline(DEFAULT_TIME_LIMIT, color="grey", linestyle=":", linewidth=1)
+            ax.set_xlabel("time_limit (s per phase)", fontsize=10)
+            ax.set_ylabel("Total Clash Score (↓ better)", fontsize=10)
+            ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     _savefig(fig, fig_dir / "sens_time_limit.png")
 
 
 def _plot_mip_gap_sweep(df: pd.DataFrame, fig_dir: Path) -> None:
-    """Two-panel: Objective vs mip_gap  |  Solve_Time vs mip_gap (log x-axis)."""
-    if df.empty:
+    """2×2 grid: rows=scenario, cols=semester. Each panel: Total_Clash_Score vs mip_gap."""
+    data = df[df["Semester"] != "Combined"] if "Semester" in df.columns else df
+    if data.empty:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle("Sensitivity: mip_gap (max_events=500, time_limit=300 s)",
-                 fontsize=13, fontweight="bold")
+    fig, axes = _make_2x2_axes(
+        f"Sensitivity — mip_gap  (max_events={DEFAULT_MAX_EVENTS}, time_limit={DEFAULT_TIME_LIMIT}s)"
+    )
 
-    metrics = [
-        ("Objective",    "Weighted Clash Score (↓ better)", axes[0]),
-        ("Solve_Time_s", "Solve Time (seconds)",            axes[1]),
-    ]
-
-    for col, ylabel, ax in metrics:
-        for sc in SCENARIOS:
-            sub = df[df["Scenario"] == sc].dropna(subset=[col])
-            if sub.empty:
-                continue
-            ax.semilogx(sub["mip_gap"] * 100, sub[col],
-                        marker="^", linewidth=2, label=SCENARIO_LABELS[sc],
-                        color=COLORS[sc])
-
-        ax.set_xlabel("mip_gap (%)", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.axvline(DEFAULT_MIP_GAP * 100, color="grey", linestyle="--",
-                   linewidth=1, label=f"Default ({DEFAULT_MIP_GAP*100:.1f}%)")
-        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f%%"))
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
+    for row_i, sc in enumerate(SCENARIOS):
+        for col_j, sem in enumerate(SEMESTERS):
+            ax  = axes[row_i, col_j]
+            sub = data[(data["Scenario"] == sc) & (data["Semester"] == sem)].dropna(
+                subset=["Total_Clash_Score"]
+            ).sort_values("mip_gap")
+            if not sub.empty:
+                ax.semilogx(sub["mip_gap"] * 100, sub["Total_Clash_Score"],
+                            marker="^", linewidth=2, color=SEM_COLORS[sem], label="Clash Score")
+                ax2 = ax.twinx()
+                sub2 = data[(data["Scenario"] == sc) & (data["Semester"] == sem)].dropna(
+                    subset=["Solve_Time_s"]
+                ).sort_values("mip_gap")
+                ax2.semilogx(sub2["mip_gap"] * 100, sub2["Solve_Time_s"],
+                             marker="o", linewidth=1.5, linestyle="--",
+                             color="grey", alpha=0.7, label="Solve Time")
+                ax2.set_ylabel("Solve Time (s)", fontsize=9, color="grey")
+                ax2.tick_params(axis="y", labelcolor="grey")
+                lines1, labels1 = ax.get_legend_handles_labels()
+                lines2, labels2 = ax2.get_legend_handles_labels()
+                ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
+            ax.axvline(DEFAULT_MIP_GAP * 100, color="grey", linestyle=":", linewidth=1)
+            ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f%%"))
+            ax.set_xlabel("mip_gap (%)", fontsize=10)
+            ax.set_ylabel("Total Clash Score (↓ better)", fontsize=10)
+            ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     _savefig(fig, fig_dir / "sens_mip_gap.png")
@@ -469,40 +561,41 @@ def _plot_mip_gap_sweep(df: pd.DataFrame, fig_dir: Path) -> None:
 
 def _plot_pareto(sweep_results: dict, fig_dir: Path) -> None:
     """
-    Quality vs Runtime Pareto scatter.
-    Each point = one (scenario, parameter_value) run across all three sweeps.
+    Quality vs Runtime Pareto scatter — 2×2 grid (scenario × semester).
+    Each point = one parameter-value run; marker encodes which parameter was swept.
     """
     frames = []
     for param_name, df in sweep_results.items():
-        tmp = df[["Scenario", "Objective", "Solve_Time_s", "Solve_Status"]].copy()
+        cols = ["Scenario", "Semester", "Total_Clash_Score", "Solve_Time_s", "Solve_Status"]
+        tmp = df[[c for c in cols if c in df.columns]].copy()
         tmp["Param"] = param_name
         frames.append(tmp)
-
     if not frames:
         return
 
     all_data = pd.concat(frames, ignore_index=True)
-    all_data  = all_data.dropna(subset=["Objective", "Solve_Time_s"])
-
+    all_data = all_data[all_data.get("Semester", pd.Series(["Combined"])) != "Combined"]
+    all_data = all_data.dropna(subset=["Total_Clash_Score", "Solve_Time_s"])
     if all_data.empty:
         return
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, axes = _make_2x2_axes("Quality vs Runtime — Pareto View (all sweeps)")
+    markers   = {"max_events": "o", "time_limit": "s", "mip_gap": "^"}
+    param_colors = {"max_events": "#0288D1", "time_limit": "#388E3C", "mip_gap": "#F57C00"}
 
-    markers = {"max_events": "o", "time_limit": "s", "mip_gap": "^"}
-    for (sc, param), grp in all_data.groupby(["Scenario", "Param"]):
-        ax.scatter(grp["Solve_Time_s"], grp["Objective"],
-                   color=COLORS.get(sc, "grey"),
-                   marker=markers.get(param, "o"),
-                   s=70, alpha=0.75,
-                   label=f"{SCENARIO_LABELS.get(sc, sc)} / {param}")
-
-    ax.set_xlabel("Solve Time (seconds)", fontsize=12)
-    ax.set_ylabel("Weighted Clash Score", fontsize=12)
-    ax.set_title("Quality vs Runtime — Pareto View (all sweeps)", fontsize=13,
-                 fontweight="bold")
-    ax.legend(fontsize=8, ncol=2)
-    ax.grid(True, alpha=0.3)
+    for row_i, sc in enumerate(SCENARIOS):
+        for col_j, sem in enumerate(SEMESTERS):
+            ax  = axes[row_i, col_j]
+            sub = all_data[(all_data["Scenario"] == sc) & (all_data["Semester"] == sem)]
+            for param, grp in sub.groupby("Param"):
+                ax.scatter(grp["Solve_Time_s"], grp["Total_Clash_Score"],
+                           color=param_colors.get(param, "grey"),
+                           marker=markers.get(param, "o"),
+                           s=60, alpha=0.8, label=param)
+            ax.set_xlabel("Solve Time (s)", fontsize=10)
+            ax.set_ylabel("Total Clash Score", fontsize=10)
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     _savefig(fig, fig_dir / "sens_pareto.png")
@@ -510,55 +603,114 @@ def _plot_pareto(sweep_results: dict, fig_dir: Path) -> None:
 
 def _plot_runtime_comparison(df_cmp: pd.DataFrame, fig_dir: Path) -> None:
     """
-    Grouped bar chart: Runtime and Objective for MIP vs Heuristic.
+    2×2 grid (scenario × semester): grouped bars MIP vs Heuristic for
+    Solve_Time_s and Total_Clash_Score side by side within each panel.
     """
-    if df_cmp.empty:
+    data = df_cmp[df_cmp.get("Semester", pd.Series(["x"])) != "Combined"] \
+           if "Semester" in df_cmp.columns else df_cmp
+    if data.empty:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig.suptitle("MIP vs Heuristic: Runtime and Solution Quality",
-                 fontsize=13, fontweight="bold")
+    fig, axes = _make_2x2_axes("MIP vs Heuristic — Runtime & Solution Quality")
+    methods = [m for m in ["MIP (Xpress)", "Heuristic (Greedy+LS)"]
+               if m in data["Method"].unique()]
+    metrics = [("Solve_Time_s", "Solve Time (s)"), ("Total_Clash_Score", "Total Clash Score")]
+    width   = 0.3
+    x       = np.arange(len(metrics))
 
-    metrics = [
-        ("Solve_Time_s", "Solve Time (seconds)"),
-        ("Objective",    "Weighted Clash Score"),
-    ]
-
-    for (col, ylabel), ax in zip(metrics, axes):
-        methods  = df_cmp["Method"].unique()
-        sc_list  = df_cmp["Scenario"].unique()
-        n_sc     = len(sc_list)
-        x        = np.arange(n_sc)
-        width    = 0.35
-        n_methods = len(methods)
-
-        for i, method in enumerate(methods):
-            sub    = df_cmp[df_cmp["Method"] == method]
-            vals   = [sub[sub["Scenario"] == sc][col].values[0]
-                      if len(sub[sub["Scenario"] == sc]) > 0 else np.nan
-                      for sc in sc_list]
-            offset = (i - (n_methods - 1) / 2) * width
-            bars   = ax.bar(x + offset, vals, width,
-                            label=method, alpha=0.85)
-            for bar, v in zip(bars, vals):
-                if not np.isnan(v):
-                    ax.text(bar.get_x() + bar.get_width() / 2,
-                            bar.get_height() * 1.01,
-                            f"{v:.0f}", ha="center", va="bottom", fontsize=8)
-
-        ax.set_xticks(x)
-        ax.set_xticklabels([SCENARIO_LABELS.get(s, s) for s in sc_list], fontsize=10)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3, axis="y")
+    for row_i, sc in enumerate(SCENARIOS):
+        for col_j, sem in enumerate(SEMESTERS):
+            ax  = axes[row_i, col_j]
+            n   = len(methods)
+            for i, method in enumerate(methods):
+                sub = data[(data["Scenario"] == sc) &
+                           (data["Semester"] == sem) &
+                           (data["Method"] == method)]
+                vals = [sub[col].values[0] if len(sub) > 0 and col in sub.columns
+                        else np.nan for col, _ in metrics]
+                offset = (i - (n - 1) / 2) * width
+                bars = ax.bar(x + offset, vals, width,
+                              label=method,
+                              color=METHOD_COLORS.get(method, "grey"),
+                              hatch=METHOD_HATCH.get(method, ""),
+                              alpha=0.85)
+                for bar, v in zip(bars, vals):
+                    if not np.isnan(v):
+                        ax.text(bar.get_x() + bar.get_width() / 2,
+                                bar.get_height() * 1.01,
+                                f"{v:,.0f}", ha="center", va="bottom", fontsize=7)
+            ax.set_xticks(x)
+            ax.set_xticklabels([lbl for _, lbl in metrics], fontsize=9)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
     _savefig(fig, fig_dir / "sens_runtime_comparison.png")
 
 
+def plot_runtime_comparison_standalone(df_cmp: pd.DataFrame, fig_dir: Path) -> None:
+    """
+    Standalone runtime-only comparison figure.
+    Left panel  : Solve_Time_s grouped by (Scenario × Semester), bars = Method.
+    Right panel : Total_Clash_Score grouped by (Scenario × Semester), bars = Method.
+    Each panel is a single grouped-bar chart with one bar-group per
+    (Scenario, Semester) combination.
+    """
+    data = df_cmp[df_cmp["Semester"] != "Combined"].copy() \
+           if "Semester" in df_cmp.columns else df_cmp.copy()
+    if data.empty:
+        print("  [runtime standalone] No data — skipping.")
+        return
+
+    methods  = [m for m in ["MIP (Xpress)", "Heuristic (Greedy+LS)"]
+                if m in data["Method"].unique()]
+    combos   = [(sc, sem) for sc in SCENARIOS for sem in SEMESTERS]
+    x_labels = [f"{SCENARIO_LABELS[sc]}\n{sem}" for sc, sem in combos]
+    x        = np.arange(len(combos))
+    width    = 0.35
+    n        = len(methods)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle("MIP vs Heuristic: Runtime Comparison by Scenario & Semester",
+                 fontsize=13, fontweight="bold")
+
+    for ax, (col, ylabel) in zip(axes, [("Solve_Time_s", "Solve Time (seconds)"),
+                                         ("Total_Clash_Score", "Total Clash Score (↓ better)")]):
+        for i, method in enumerate(methods):
+            vals = []
+            for sc, sem in combos:
+                sub = data[(data["Scenario"] == sc) &
+                           (data["Semester"]  == sem) &
+                           (data["Method"]    == method)]
+                vals.append(sub[col].values[0] if len(sub) > 0 and col in sub.columns
+                            else np.nan)
+            offset = (i - (n - 1) / 2) * width
+            bars   = ax.bar(x + offset, vals, width,
+                            label=method,
+                            color=METHOD_COLORS.get(method, "grey"),
+                            hatch=METHOD_HATCH.get(method, ""),
+                            alpha=0.85, edgecolor="white")
+            for bar, v in zip(bars, vals):
+                if not np.isnan(v):
+                    ax.text(bar.get_x() + bar.get_width() / 2,
+                            bar.get_height() * 1.01,
+                            f"{v:,.0f}", ha="center", va="bottom", fontsize=8)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    _savefig(fig, fig_dir / "runtime_comparison_standalone.png")
+    print(f"  [runtime standalone] Saved → {fig_dir / 'runtime_comparison_standalone.png'}")
+
+
 def _plot_heatmap(
     events: pd.DataFrame,
     conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
     out_dir: Path,
     fig_dir: Path,
     scenario: str = "S1_9am5pm",
@@ -582,12 +734,13 @@ def _plot_heatmap(
                 scenario       = scenario,
                 events         = events,
                 conflict_pairs = conflict_pairs,
+                student_events = student_events,
                 max_events     = me,
                 time_limit     = tl,
                 mip_gap        = DEFAULT_MIP_GAP,
                 tmp_dir        = tmp_dir,
             )
-            matrix[i, j] = row["Objective"]
+            matrix[i, j] = row["Total_Clash_Score"]
 
     # Save raw data
     hm_df = pd.DataFrame(
@@ -691,11 +844,13 @@ def run_sensitivity_analysis(
     _plot_mip_gap_sweep(sweep_results["mip_gap"], fig_dir)
     _plot_pareto(sweep_results, fig_dir)
     _plot_runtime_comparison(comparison_df, fig_dir)
+    plot_runtime_comparison_standalone(comparison_df, fig_dir)
 
     if run_heatmap:
         _plot_heatmap(
             events         = data["events"],
             conflict_pairs = data.get("conflict_pairs"),
+            student_events = data["student_events"],
             out_dir        = base_dir,
             fig_dir        = fig_dir,
             scenario       = heatmap_scenario,
@@ -725,58 +880,63 @@ def _run_mip_no_tlimit(
     scenario: str,
     events: pd.DataFrame,
     conflict_pairs: pd.DataFrame,
+    student_events: pd.DataFrame,
     max_events: int,
     mip_gap: float,
     tmp_dir: Path,
-) -> dict:
+) -> list:
     """
-    Run one two-phase MIP solve with NO time limit.
-
-    Returns a flat metrics dict:
-        Scenario, Model, max_events, Solve_Time_s,
-        Objective, N_Clashes, N_Rescheduled, Solve_Status
+    Run one two-phase MIP solve (per-semester) with NO time limit.
+    Returns a list of dicts — one per semester + "Combined".
     """
-    base = {
-        "Scenario":      scenario,
-        "Model":         "MIP",
-        "max_events":    max_events,
-        "Solve_Time_s":  np.nan,
-        "Objective":     np.nan,
-        "N_Clashes":     np.nan,
-        "N_Rescheduled": 0,
-        "Solve_Status":  "ERROR",
-    }
+    err = {"Scenario": scenario, "Model": "MIP", "Semester": "Combined",
+           "max_events": max_events, "Solve_Time_s": np.nan,
+           "Total_Clash_Score": np.nan, "DD_Clash_Score": np.nan,
+           "DF_Clash_Score": np.nan, "N_Clashes": np.nan,
+           "N_Rescheduled": 0, "Solve_Status": "ERROR"}
     try:
-        from mip_model import run_mip_scenario
+        from mip_new import run_mip_scenario_new
         t0  = time.time()
-        res = run_mip_scenario(
+        res = run_mip_scenario_new(
             scenario       = scenario,
             events         = events,
             conflict_pairs = conflict_pairs,
+            student_events = student_events,
             max_events     = max_events,
-            time_limit     = _NO_TIME_LIMIT,  # 0 → Xpress maxtime=0 → no limit
+            time_limit     = _NO_TIME_LIMIT,
             mip_gap        = mip_gap,
             verbose        = False,
             out_dir        = tmp_dir,
         )
-        elapsed = time.time() - t0
-        base.update({
-            "Solve_Time_s":  round(elapsed, 2),
-            "Objective":     res.get("objective") or np.nan,
-            "N_Clashes":     res.get("n_clashes", np.nan),
-            "N_Rescheduled": len(res["assignment_df"])
-                             if res.get("assignment_df") is not None else 0,
-            "Solve_Status":  res.get("status", "UNKNOWN"),
-        })
+        elapsed = round(time.time() - t0, 2)
+        rows = []
+        for sem, sr in res.get("sem_results", {}).items():
+            rows.append({"Scenario": scenario, "Model": "MIP", "Semester": sem,
+                         "max_events": max_events, "Solve_Time_s": elapsed,
+                         "Total_Clash_Score": sr.get("total_clash_score", np.nan),
+                         "DD_Clash_Score":    sr.get("dd_clash_score",    np.nan),
+                         "DF_Clash_Score":    sr.get("df_clash_score",    np.nan),
+                         "N_Clashes":         sr.get("n_clashes",         np.nan),
+                         "N_Rescheduled":     len(sr["assignment_df"]) if sr.get("assignment_df") is not None else 0,
+                         "Solve_Status":      sr.get("status", "UNKNOWN")})
+        rows.append({"Scenario": scenario, "Model": "MIP", "Semester": "Combined",
+                     "max_events": max_events, "Solve_Time_s": elapsed,
+                     "Total_Clash_Score": res.get("total_clash_score", np.nan),
+                     "DD_Clash_Score":    res.get("dd_clash_score",    np.nan),
+                     "DF_Clash_Score":    res.get("df_clash_score",    np.nan),
+                     "N_Clashes":         res.get("n_clashes",         np.nan),
+                     "N_Rescheduled":     len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
+                     "Solve_Status":      res.get("status", "UNKNOWN")})
+        return rows
     except ImportError:
-        print(f"  [runtime] xpress/mip_model not available — skipping MIP "
+        print(f"  [runtime] xpress/mip_new not available — skipping MIP "
               f"(scenario={scenario}, max_events={max_events}).")
-        base["Solve_Status"] = "SKIPPED"
+        err["Solve_Status"] = "SKIPPED"
     except Exception as e:
         print(f"  [runtime] MIP failed (scenario={scenario}, "
               f"max_events={max_events}): {e}")
         traceback.print_exc()
-    return base
+    return [err]
 
 
 def _run_heuristic_no_tlimit(
@@ -787,28 +947,19 @@ def _run_heuristic_no_tlimit(
     max_events: int,
     ls_max_iter: int,
     tmp_dir: Path,
-) -> dict:
+) -> list:
     """
-    Run one Greedy + Local-Search heuristic solve.
-    No time limit is imposed (the heuristic runs until convergence or
-    ls_max_iter is exhausted).
-
-    Returns the same flat metrics schema as _run_mip_no_tlimit.
+    Run one Greedy + Local-Search heuristic solve (per-semester).
+    No time limit is imposed. Returns a list of dicts — one per semester + "Combined".
     """
-    base = {
-        "Scenario":      scenario,
-        "Model":         "Heuristic",
-        "max_events":    max_events,
-        "Solve_Time_s":  np.nan,
-        "Objective":     np.nan,
-        "N_Clashes":     np.nan,
-        "N_Rescheduled": 0,
-        "Solve_Status":  "ERROR",
-    }
+    err = {"Scenario": scenario, "Model": "Heuristic", "Semester": "Combined",
+           "max_events": max_events, "Solve_Time_s": np.nan,
+           "Total_Clash_Score": np.nan, "DD_Clash_Score": np.nan,
+           "N_Rescheduled": 0, "Solve_Status": "ERROR"}
     try:
-        from heuristic_model import run_heuristic_scenario
+        from heuristic_new import run_heuristic_scenario_new
         t0  = time.time()
-        res = run_heuristic_scenario(
+        res = run_heuristic_scenario_new(
             scenario         = scenario,
             events           = events,
             conflict_pairs   = conflict_pairs,
@@ -818,23 +969,30 @@ def _run_heuristic_no_tlimit(
             ls_max_iter      = ls_max_iter,
             out_dir          = tmp_dir,
         )
-        elapsed = time.time() - t0
+        elapsed = round(time.time() - t0, 2)
+        rows = []
+        for sem, sr in res.get("sem_results", {}).items():
+            ls  = sr.get("ls_full_score",   sr.get("greedy_full_score", np.nan))
+            dd  = sr.get("ls_dd_score",     sr.get("greedy_dd_score",   np.nan))
+            rows.append({"Scenario": scenario, "Model": "Heuristic", "Semester": sem,
+                         "max_events": max_events, "Solve_Time_s": elapsed,
+                         "Total_Clash_Score": ls, "DD_Clash_Score": dd,
+                         "N_Rescheduled": len(sr["assignment_df"]) if sr.get("assignment_df") is not None else 0,
+                         "Solve_Status": "FEASIBLE"})
         sm = res.get("summary", {})
-        ls_score = sm.get("LocalSearch_Clash_Score",
-                          sm.get("Greedy_Clash_Score", np.nan))
-        base.update({
-            "Solve_Time_s":  round(elapsed, 2),
-            "Objective":     ls_score,
-            "N_Clashes":     ls_score,   # same metric for comparability
-            "N_Rescheduled": len(res["assignment_df"])
-                             if res.get("assignment_df") is not None else 0,
-            "Solve_Status":  "FEASIBLE",
-        })
+        ls_full = sm.get("LocalSearch_Full_Clash_Score", sm.get("Greedy_Full_Clash_Score", np.nan))
+        ls_dd   = sm.get("LocalSearch_DD_Clash_Score",   sm.get("Greedy_DD_Clash_Score",   np.nan))
+        rows.append({"Scenario": scenario, "Model": "Heuristic", "Semester": "Combined",
+                     "max_events": max_events, "Solve_Time_s": elapsed,
+                     "Total_Clash_Score": ls_full, "DD_Clash_Score": ls_dd,
+                     "N_Rescheduled": len(res["assignment_df"]) if res.get("assignment_df") is not None else 0,
+                     "Solve_Status": "FEASIBLE"})
+        return rows
     except Exception as e:
         print(f"  [runtime] Heuristic failed (scenario={scenario}, "
               f"max_events={max_events}): {e}")
         traceback.print_exc()
-    return base
+    return [err]
 
 
 def run_runtime_vs_max_events(
@@ -915,6 +1073,7 @@ def run_runtime_vs_max_events(
                 scenario       = sc,
                 events         = events,
                 conflict_pairs = conflict_pairs,
+                student_events = student_events,
                 max_events     = me,
                 mip_gap        = mip_gap,
                 tmp_dir        = tmp_dir,
