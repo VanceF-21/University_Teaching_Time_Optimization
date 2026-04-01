@@ -10,6 +10,10 @@ Usage:
     python main.py --skip-heuristic         # Skip heuristic (run MIP only)
     python main.py --mip-events 200         # Limit MIP to 200 displaced events
     python main.py --mip-time 120           # MIP solver time limit (seconds)
+    python main.py --new-mip                # Also run mip_new.py (full objective)
+    python main.py --new-heuristic          # Also run heuristic_new.py (full score)
+    python main.py --only-new-models        # Skip originals, run only new models
+    python main.py --replace-with-new       # Run new models and use them for viz/summary
 
 Pipeline Steps:
     ─────────────────────────────────────────────────────────────────────────
@@ -121,19 +125,38 @@ def main():
     print("\n>>> STEP 2: BASELINE ANALYSIS")
     baseline_results = run_baseline_analysis(data, out_dir=run_dir)
 
+    # Determine whether new models replace originals in downstream steps
+    use_new = args.replace_with_new or args.only_new_models
+
     # ── Step 3: MIP Model ────────────────────────────────────────────────────
     mip_results = {}
-    if not args.skip_mip:
+    run_orig_mip = not args.skip_mip and not use_new
+    if run_orig_mip:
         mip_results = _run_mip(args, data, run_dir)
     else:
-        print("\n>>> STEP 3: MIP skipped (--skip-mip)")
+        print("\n>>> STEP 3: MIP (original) skipped")
+
+    # ── Step 3b: MIP NEW (full objective) ────────────────────────────────────
+    mip_new_results = {}
+    if args.new_mip or use_new:
+        mip_new_results = _run_new_mip(args, data, run_dir)
+        if use_new:
+            mip_results = mip_new_results   # replace: new results flow into steps 5/6
 
     # ── Step 4: Heuristic Model ───────────────────────────────────────────────
     heuristic_results = {}
-    if not args.skip_heuristic:
+    run_orig_heur = not args.skip_heuristic and not use_new
+    if run_orig_heur:
         heuristic_results = _run_heuristic(args, data, run_dir)
     else:
-        print("\n>>> STEP 4: Heuristic skipped (--skip-heuristic)")
+        print("\n>>> STEP 4: Heuristic (original) skipped")
+
+    # ── Step 4b: Heuristic NEW (full clash score) ─────────────────────────────
+    heuristic_new_results = {}
+    if args.new_heuristic or use_new:
+        heuristic_new_results = _run_new_heuristic(args, data, run_dir)
+        if use_new:
+            heuristic_results = heuristic_new_results  # replace: flows into steps 5/6
 
     # ── Step 5: Visualisation ─────────────────────────────────────────────────
     if not args.skip_viz:
@@ -191,6 +214,65 @@ def _run_mip(args, data: dict, run_dir: Path) -> dict:
         print(f"  [ERROR] MIP model failed: {e}")
         traceback.print_exc()
     return mip_results
+
+
+def _run_new_mip(args, data: dict, run_dir: Path) -> dict:
+    """Run full-objective MIP (mip_new.py: disp–disp + disp–fixed in objective)."""
+    new_mip_results = {}
+    print("\n>>> STEP 3b: MIP NEW OPTIMISATION (full objective: disp–disp + disp–fixed)")
+    try:
+        from mip_new import run_all_mip_scenarios_new, run_mip_scenario_new
+        if args.scenario == "both":
+            new_mip_results = run_all_mip_scenarios_new(
+                data, max_events=args.mip_events, time_limit=args.mip_time,
+                out_dir=run_dir)
+        else:
+            new_mip_results[args.scenario] = run_mip_scenario_new(
+                scenario       = args.scenario,
+                events         = data["events"],
+                conflict_pairs = data.get("conflict_pairs"),
+                student_events = data["student_events"],
+                max_events     = args.mip_events,
+                time_limit     = args.mip_time,
+                out_dir        = run_dir,
+            )
+    except ImportError as e:
+        print(f"  [WARNING] Could not import mip_new: {e}")
+    except Exception as e:
+        print(f"  [ERROR] MIP new model failed: {e}")
+        traceback.print_exc()
+    return new_mip_results
+
+
+def _run_new_heuristic(args, data: dict, run_dir: Path) -> dict:
+    """Run full-objective heuristic (heuristic_new.py: full clash score)."""
+    new_heur_results = {}
+    print("\n>>> STEP 4b: HEURISTIC NEW (full clash score: disp–disp + disp–fixed)")
+    try:
+        from heuristic_new import run_all_heuristic_scenarios_new, run_heuristic_scenario_new
+        if args.scenario == "both":
+            new_heur_results = run_all_heuristic_scenarios_new(
+                data,
+                max_events = args.heur_events,
+                run_ls     = not args.no_ls,
+                ls_iter    = args.heur_iter,
+                out_dir    = run_dir,
+            )
+        else:
+            new_heur_results[args.scenario] = run_heuristic_scenario_new(
+                scenario         = args.scenario,
+                events           = data["events"],
+                conflict_pairs   = data.get("conflict_pairs"),
+                student_events   = data["student_events"],
+                max_events       = args.heur_events,
+                run_local_search = not args.no_ls,
+                ls_max_iter      = args.heur_iter,
+                out_dir          = run_dir,
+            )
+    except Exception as e:
+        print(f"  [ERROR] Heuristic new model failed: {e}")
+        traceback.print_exc()
+    return new_heur_results
 
 
 def _run_heuristic(args, data: dict, run_dir: Path) -> dict:

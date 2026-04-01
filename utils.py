@@ -147,6 +147,17 @@ def parse_args():
     parser.add_argument("--scenario",    default="both",
                         choices=["S1_9am5pm", "S2_NoFriPM", "both"],
                         help="Which scenario(s) to optimise (default: both)")
+    # ── New-model flags ──────────────────────────────────────────────────────
+    parser.add_argument("--new-mip",          action="store_true",
+                        help="Also run mip_new.py (full objective: disp–disp + disp–fixed)")
+    parser.add_argument("--new-heuristic",    action="store_true",
+                        help="Also run heuristic_new.py (full clash score)")
+    parser.add_argument("--only-new-models",  action="store_true",
+                        help="Skip original MIP/heuristic; run only new models")
+    parser.add_argument("--replace-with-new", action="store_true",
+                        help="Run new models and use their results for viz/summary/comparison "
+                             "(original models are skipped; equivalent to --only-new-models "
+                             "but makes the substitution intent explicit)")
     return parser.parse_args()
 
 
