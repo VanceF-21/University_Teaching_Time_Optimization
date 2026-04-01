@@ -247,60 +247,79 @@ def build_conflict_pairs(student_events: pd.DataFrame,
                          max_students_for_full_build: int = 30_000
                          ) -> pd.DataFrame:
     """
-    Build a table of (Event_A, Event_B) pairs that share at least one student.
-    This is the 'conflict graph' used in both the MIP and heuristic models.
+    Build a table of (Event_A, Event_B) pairs that share at least one student
+    AND belong to the same semester.
+
+    Events from different semesters cannot conflict (a student cannot attend
+    a Semester 1 and a Semester 2 event simultaneously), so cross-semester
+    pairs are excluded.
 
     Strategy:
-      - Group by AnonID → list of Event_IDs that student attends
-      - For each student, generate all pairs (e1, e2) from their event list
+      - Filter student_events to in-person scheduled events
+      - Attach each event's Semester label
+      - Group by (AnonID, Semester) → list of Event_IDs in that semester
+      - For each (student, semester) group, generate all pairs (e1, e2)
       - De-duplicate pairs (canonical order: e1 < e2)
-
-    For large datasets this can be memory-intensive, so we:
-      (a) work only on events that appear in the events DataFrame (in-person, scheduled)
-      (b) use efficient set operations
 
     Returns
     -------
     pd.DataFrame with columns:
-        Event_A, Event_B, Shared_Students (count)
+        Event_A, Event_B, Shared_Students (count), Semester
     """
-    print("[data_preprocessing] Building conflict pairs (this may take a minute)...")
+    print("[data_preprocessing] Building conflict pairs per semester (this may take a minute)...")
 
     # Filter student_events to only in-person scheduled events
     valid_event_ids = set(events["Event_ID"].unique())
     se_filtered = student_events[student_events["Event_ID"].isin(valid_event_ids)].copy()
     print(f"  Filtered student-events: {len(se_filtered):,}")
 
-    # Build event → set of students (for counting shared students later)
-    event_students = se_filtered.groupby("Event_ID")["AnonID"].apply(set)
+    # Attach semester from events table (authoritative source)
+    event_semester = events[["Event_ID", "Semester"]].drop_duplicates("Event_ID")
+    se_filtered = se_filtered.merge(
+        event_semester.rename(columns={"Semester": "Event_Semester"}),
+        on="Event_ID", how="left"
+    )
 
-    # Build student → list of events
+    sem_counts = se_filtered["Event_Semester"].value_counts(dropna=False)
+    print(f"  Student-events by semester: {sem_counts.to_dict()}")
+
+    # Group by (AnonID, Semester) — only pairs within same semester are generated
     student_event_lists = (
-        se_filtered.groupby("AnonID")["Event_ID"]
+        se_filtered.groupby(["AnonID", "Event_Semester"])["Event_ID"]
         .apply(list)
         .reset_index()
     )
+    print(f"  (AnonID, Semester) groups: {len(student_event_lists):,}")
 
-    # Generate all conflict pairs
+    # Generate all conflict pairs within each (student, semester) group
     pair_counts: dict = {}
+    pair_semester: dict = {}
     processed = 0
     for _, row in student_event_lists.iterrows():
         evs = sorted(row["Event_ID"])
+        sem = row["Event_Semester"]
         for i in range(len(evs)):
             for j in range(i + 1, len(evs)):
                 key = (evs[i], evs[j])
                 pair_counts[key] = pair_counts.get(key, 0) + 1
+                pair_semester[key] = sem   # both events share same semester
         processed += 1
         if processed % 5000 == 0:
-            print(f"    Processed {processed:,} / {len(student_event_lists):,} students, "
+            print(f"    Processed {processed:,} / {len(student_event_lists):,} groups, "
                   f"pairs so far: {len(pair_counts):,}")
 
-    print(f"  Total conflict pairs found: {len(pair_counts):,}")
+    print(f"  Total conflict pairs found (same-semester only): {len(pair_counts):,}")
 
     df_pairs = pd.DataFrame(
-        [(a, b, c) for (a, b), c in pair_counts.items()],
-        columns=["Event_A", "Event_B", "Shared_Students"],
+        [(a, b, c, pair_semester.get((a, b), None))
+         for (a, b), c in pair_counts.items()],
+        columns=["Event_A", "Event_B", "Shared_Students", "Semester"],
     )
+
+    # Summary by semester
+    for sem, grp in df_pairs.groupby("Semester"):
+        print(f"  Conflict pairs in {sem}: {len(grp):,}")
+
     return df_pairs
 
 
